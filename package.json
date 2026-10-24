@@ -1,0 +1,22 @@
+{
+  "name": "coc-ranked-tracker",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "seed-tiers": "tsx src/seed-tiers.ts",
+    "smoke": "tsx src/smoke.ts",
+    "probe": "tsx src/retention-probe.ts"
+  },
+  "dependencies": {
+    "clashofclans.js": "^5.1.0",
+    "dotenv": "^16.4.5",
+    "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

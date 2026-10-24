@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: coc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-coc_dev}
+      POSTGRES_DB: coc
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+volumes:
+  pgdata:
