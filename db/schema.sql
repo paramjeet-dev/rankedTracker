@@ -11,20 +11,24 @@ CREATE TABLE league_tier (
 CREATE TABLE season (
   season_id   TEXT PRIMARY KEY,          -- API leagueSeasonId = season START, epoch seconds (Monday 05:00 UTC)
   starts_at   TIMESTAMPTZ,               -- = to_timestamp(season_id)
-  ends_at     TIMESTAMPTZ                -- = starts_at + 7 days
+  ends_at     TIMESTAMPTZ,               -- = starts_at + 7 days
+  swept_at    TIMESTAMPTZ                -- set when the post-rollover sweep was queued
 );
 
 CREATE TABLE clan (
   clan_tag    TEXT PRIMARY KEY,
   name        TEXT,
-  updated_at  TIMESTAMPTZ DEFAULT now()
+  updated_at  TIMESTAMPTZ DEFAULT now(),
+  members_crawled_at TIMESTAMPTZ
 );
 
 CREATE TABLE player (
   player_tag  TEXT PRIMARY KEY,
   name        TEXT,
   first_seen  TIMESTAMPTZ DEFAULT now(),
-  last_seen   TIMESTAMPTZ DEFAULT now()
+  last_seen   TIMESTAMPTZ DEFAULT now(),
+  profiled_at TIMESTAMPTZ,
+  tier_id     BIGINT
 );
 
 CREATE TABLE player_name_history (
@@ -79,6 +83,7 @@ CREATE TABLE group_member (
   autofill_trophies  INT,
   avg_attack_stars   NUMERIC(4,3),
   computed_rank      INT,
+  logs_fetched_at    TIMESTAMPTZ,
   PRIMARY KEY (group_tag, season_id, player_tag),
   FOREIGN KEY (group_tag, season_id) REFERENCES league_group
 );
@@ -98,6 +103,8 @@ CREATE TABLE battle (
 -- Create one partition per season, e.g.:
 -- CREATE TABLE battle_<season_id> PARTITION OF battle FOR VALUES IN ('<season_id>');
 
+CREATE INDEX group_member_pending_idx ON group_member (group_tag, season_id) WHERE logs_fetched_at IS NULL;
+
 -- Postgres-backed queue (use FOR UPDATE SKIP LOCKED)
 CREATE TABLE job (
   id          BIGSERIAL PRIMARY KEY,
@@ -108,9 +115,13 @@ CREATE TABLE job (
   attempts    INT NOT NULL DEFAULT 0,
   status      TEXT NOT NULL DEFAULT 'queued'
               CHECK (status IN ('queued','running','done','failed')),
+  locked_at   TIMESTAMPTZ,
+  last_error  TEXT,
+  updated_at  TIMESTAMPTZ DEFAULT now(),
   UNIQUE (kind, payload)
 );
 CREATE INDEX job_pick ON job (priority, run_after) WHERE status = 'queued';
+CREATE INDEX job_group_idx ON job ((payload->>'groupTag'), (payload->>'seasonId')) WHERE kind = 'group_fetch';
 
 CREATE TABLE raw_response (
   id          BIGSERIAL PRIMARY KEY,
