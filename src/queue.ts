@@ -1,4 +1,4 @@
-import { db } from './db.js';
+import { db, retryDeadlock } from './db.js';
 
 export type JobKind = 'profile' | 'clan_members' | 'history_backfill' | 'group_fetch';
 
@@ -18,7 +18,9 @@ export const MAX_ATTEMPTS = Number(process.env.JOB_MAX_ATTEMPTS ?? 5);
  */
 export async function enqueueMany(kind: JobKind, payloads: object[], priority = 100, requeue = false) {
   if (!payloads.length) return;
-  await db.query(
+  // Fixed order so concurrent bulk inserts lock the same rows in the same order (no deadlocks)
+  const sorted = payloads.map(p => JSON.stringify(p)).sort();
+  await retryDeadlock(() => db.query(
     `INSERT INTO job (kind, payload, priority)
      SELECT $1, p, $3 FROM jsonb_array_elements($2::jsonb) p
      ON CONFLICT (kind, payload) DO UPDATE SET
@@ -27,8 +29,8 @@ export async function enqueueMany(kind: JobKind, payloads: object[], priority = 
        attempts   = CASE WHEN $4 AND job.status IN ('done','failed') THEN 0 ELSE job.attempts END,
        run_after  = CASE WHEN $4 AND job.status IN ('done','failed') THEN now() ELSE job.run_after END,
        updated_at = now()`,
-    [kind, JSON.stringify(payloads), priority, requeue]
-  );
+    [kind, '[' + sorted.join(',') + ']', priority, requeue]
+  ));
 }
 
 export const enqueue = (kind: JobKind, payload: object, priority = 100, requeue = false) =>

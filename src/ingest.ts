@@ -1,4 +1,4 @@
-import { db, tx, normTag } from './db.js';
+import { db, tx, normTag, retryDeadlock } from './db.js';
 import { client, getProfileRaw, getLeagueGroupForPlayer } from './coc.js';
 import { enqueueMany } from './queue.js';
 
@@ -32,8 +32,23 @@ async function ensureSeason(c: { query: typeof db.query }, seasonId: string | nu
     `INSERT INTO season (season_id, starts_at, ends_at)
      VALUES ($1, to_timestamp($2::bigint), to_timestamp($2::bigint) + interval '7 days')
      ON CONFLICT (season_id) DO NOTHING`, [id, id]);
-  // one battle partition per season
-  await c.query(`CREATE TABLE IF NOT EXISTS battle_${id} PARTITION OF battle FOR VALUES IN ('${id}')`);
+}
+
+/**
+ * One battle partition per season. Created OUTSIDE any transaction (creating a partition needs a strong lock on
+ * the battle table, which must never be held while other locks are held) and remembered in memory.
+ */
+const partitions = new Set<string>();
+async function ensurePartition(seasonId: string | number) {
+  const id = String(seasonId);
+  if (!/^\d+$/.test(id)) throw new Error(`Bad season id ${id}`);
+  if (partitions.has(id)) return;
+  try {
+    await retryDeadlock(() => db.query(`CREATE TABLE IF NOT EXISTS battle_${id} PARTITION OF battle FOR VALUES IN ('${id}')`));
+  } catch (e: any) {
+    if (e?.code !== '42P07' && e?.code !== '23505') throw e; // another worker created it at the same moment
+  }
+  partitions.add(id);
 }
 
 async function groupKnown(groupTag: string, seasonId: string | number) {
@@ -43,15 +58,17 @@ async function groupKnown(groupTag: string, seasonId: string | number) {
 
 async function upsertClans(c: { query: typeof db.query }, clans: Map<string, string>) {
   if (!clans.size) return;
+  const rows = [...clans.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); // fixed lock order
   await c.query(
     `INSERT INTO clan (clan_tag, name) SELECT * FROM unnest($1::text[], $2::text[])
      ON CONFLICT (clan_tag) DO UPDATE SET name = EXCLUDED.name, updated_at = now()`,
-    [[...clans.keys()], [...clans.values()]]);
+    [rows.map(r => r[0]), rows.map(r => r[1])]);
 }
 
 async function upsertPlayers(c: { query: typeof db.query }, players: Map<string, string>) {
   if (!players.size) return;
-  const tags = [...players.keys()], names = [...players.values()];
+  const rows = [...players.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); // fixed lock order
+  const tags = rows.map(r => r[0]), names = rows.map(r => r[1]);
   await c.query(
     `INSERT INTO player (player_tag, name) SELECT * FROM unnest($1::text[], $2::text[])
      ON CONFLICT (player_tag) DO UPDATE SET name = EXCLUDED.name, last_seen = now()`, [tags, names]);
@@ -162,7 +179,8 @@ export async function runClanMembers(p: { clanTag: string }) {
 export async function runGroupFetch(p: { groupTag: string; seasonId: string; playerTag: string; tierId: number }) {
   if (!inScope(p.tierId)) return; // Legend (and anything outside Titan..Electro): skip the whole group
   const res = await getLeagueGroupForPlayer(p.groupTag, p.seasonId, p.playerTag);
-  const members = res.members ?? [];
+  await ensurePartition(p.seasonId);
+  const members = [...(res.members ?? [])].sort((a, b) => (a.playerTag < b.playerTag ? -1 : a.playerTag > b.playerTag ? 1 : 0));
   const expected = members.reduce((n, m) => n + m.attackWinCount + m.attackLoseCount, 0);
 
   const clans = new Map<string, string>();
@@ -183,6 +201,11 @@ export async function runGroupFetch(p: { groupTag: string; seasonId: string; pla
     B.stars.push(d.stars); B.dest.push(d.destructionPercentage);
     B.tro.push(40 - d.trophies); // stored value is the attacker's gain; defender's logged change = 40 - gain
   }
+
+  // sort battles by primary key so concurrent inserts always take locks in the same order
+  const order = B.att.map((_, i) => i).sort((i, j) =>
+    B.att[i] < B.att[j] ? -1 : B.att[i] > B.att[j] ? 1 : B.def[i] < B.def[j] ? -1 : B.def[i] > B.def[j] ? 1 : B.time[i] < B.time[j] ? -1 : B.time[i] > B.time[j] ? 1 : 0);
+  for (const k of Object.keys(B) as (keyof typeof B)[]) (B as any)[k] = order.map(i => (B as any)[k][i]);
 
   await tx(async c => {
     await ensureSeason(c, p.seasonId);
