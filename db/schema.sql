@@ -1,4 +1,4 @@
--- Ranked Mode History Tracker: Phase 0 schema
+-- Ranked Mode History Tracker: complete schema (fresh install; no migrations needed)
 -- Tags are stored as TEXT for now (BIGINT encoding is an optional later optimisation).
 
 CREATE TABLE league_tier (
@@ -88,7 +88,7 @@ CREATE TABLE group_member (
   FOREIGN KEY (group_tag, season_id) REFERENCES league_group
 );
 
--- Layer C: battles. One trophy value per battle (attacker's gain); defender's = 40 - trophies.
+-- Layer C: battles. Both sides' raw trophy values from the API are kept (see npm run trophies for how they relate).
 CREATE TABLE battle (
   season_id     TEXT NOT NULL,
   attacker_tag  TEXT NOT NULL,
@@ -97,7 +97,8 @@ CREATE TABLE battle (
   group_tag     TEXT NOT NULL,
   stars         SMALLINT,
   destruction   SMALLINT,
-  trophies      SMALLINT,
+  attacker_trophies SMALLINT,            -- from the attacker's attack log
+  defender_trophies SMALLINT,            -- from the defender's defense log
   PRIMARY KEY (season_id, attacker_tag, defender_tag, battle_time)
 ) PARTITION BY LIST (season_id);
 -- Create one partition per season, e.g.:
@@ -105,10 +106,27 @@ CREATE TABLE battle (
 
 CREATE INDEX group_member_pending_idx ON group_member (group_tag, season_id) WHERE logs_fetched_at IS NULL;
 
+-- Battles with both sides' trophy values filled in.
+-- Rules (from the game): the attacker earns 40 with 3 stars, 16-32 with 2, 5-15 with 1, 0-4 with 0 stars.
+-- The defender gets 40 minus the attacker's trophies, except when the attacker has 0 stars: then the defender gets 40.
+-- Raw values come from the API logs; a missing side is derived with these rules. trophy_source tells which.
+CREATE VIEW battle_resolved AS
+SELECT b.*,
+  COALESCE(b.attacker_trophies,
+    CASE WHEN b.stars = 3 THEN 40
+         WHEN b.stars = 0 THEN LEAST(4, b.destruction / 10)
+         ELSE 40 - b.defender_trophies END)                          AS attacker_trophies_final,
+  COALESCE(b.defender_trophies,
+    CASE WHEN b.stars = 0 THEN 40 ELSE 40 - b.attacker_trophies END) AS defender_trophies_final,
+  CASE WHEN b.attacker_trophies IS NOT NULL AND b.defender_trophies IS NOT NULL THEN 'both'
+       WHEN b.attacker_trophies IS NOT NULL THEN 'attacker_log'
+       ELSE 'defender_log' END                                       AS trophy_source
+FROM battle b;
+
 -- Postgres-backed queue (use FOR UPDATE SKIP LOCKED)
 CREATE TABLE job (
   id          BIGSERIAL PRIMARY KEY,
-  kind        TEXT NOT NULL,             -- profile | group_fetch | history_backfill
+  kind        TEXT NOT NULL,             -- clan_members | profile | history_backfill | group_fetch
   payload     JSONB NOT NULL,
   priority    INT NOT NULL DEFAULT 100,  -- lower = sooner (app users, expiring groups first)
   run_after   TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -3,22 +3,13 @@
 import { db } from './db.js';
 import { loginCoc } from './coc.js';
 import { claim, complete, fail, recoverStale, isRetryable, Job } from './queue.js';
-import { loadScope, runProfile, runHistory, runClanMembers, runGroupFetch, finalizeGroup, stats } from './ingest.js';
+import { loadScope, finalizeGroup, stats } from './ingest.js';
+import { handle } from './jobs.js';
 import { sweepDue } from './sweep.js';
 
 const CONCURRENCY = Number(process.env.CRAWL_CONCURRENCY ?? 32);
 let stopping = false;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-async function handle(job: Job) {
-  switch (job.kind) {
-    case 'profile': return runProfile(job.payload);
-    case 'history_backfill': return runHistory(job.payload);
-    case 'clan_members': return runClanMembers(job.payload);
-    case 'group_fetch': return runGroupFetch(job.payload);
-    default: throw Object.assign(new Error(`unknown job kind ${job.kind}`), { status: 400 });
-  }
-}
 
 async function worker(n: number) {
   while (!stopping) {
@@ -42,7 +33,7 @@ async function worker(n: number) {
 async function report() {
   const { rows } = await db.query(`SELECT kind, status, count(*)::int n FROM job GROUP BY 1,2 ORDER BY 1,2`);
   const line = rows.map(r => `${r.kind}:${r.status}=${r.n}`).join('  ') || 'queue empty';
-  console.log(`[${new Date().toISOString()}] ${line} | battles+${stats.battlesInserted} mismatches=${stats.trophyMismatch}`);
+  console.log(`[${new Date().toISOString()}] ${line} | group calls ${stats.groupCalls}, battle rows written ${stats.battleRowsWritten}`);
 }
 
 async function main() {

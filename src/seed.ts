@@ -21,7 +21,8 @@ async function main() {
   await loginCoc();
 
   if (tags.length) {
-    await enqueueMany('profile', tags.map(t => ({ playerTag: t })), PRIO.appUser, true);
+    // full: true = also collect battle logs of their CURRENT (running) group, not just the roster
+    await enqueueMany('profile', tags.map(t => ({ playerTag: t, full: true })), PRIO.appUser, true);
     console.log(`queued ${tags.length} priority player(s)`);
   }
 

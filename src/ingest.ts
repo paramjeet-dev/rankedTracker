@@ -1,6 +1,15 @@
 import { db, tx, normTag, retryDeadlock } from './db.js';
 import { client, getProfileRaw, getLeagueGroupForPlayer } from './coc.js';
-import { enqueueMany } from './queue.js';
+import { enqueueMany, isRetryable } from './queue.js';
+
+// ---------- configuration ----------
+// LIVE_LOGS=true      also collect battle logs while a season is still running (default: rosters only, logs after the season ends)
+// COLLECT=all         fetch every member of a group even when all battles are already covered (default: stop as soon as covered)
+// DISCOVER_GROUPMATES=true  also queue a profile for every group-mate (default off: their clans are crawled instead)
+const LIVE_LOGS = process.env.LIVE_LOGS === 'true';
+const FETCH_ALL_MEMBERS = process.env.COLLECT === 'all';
+const DISCOVER_GROUPMATES = process.env.DISCOVER_GROUPMATES === 'true';
+const WEEK = 7 * 24 * 3600;
 
 // ---------- scope (Titan..Electro; Legend and below are skipped) ----------
 let scope = new Set<number>();
@@ -12,11 +21,13 @@ export async function loadScope() {
 export const inScope = (tierId: number | undefined | null) => tierId != null && scope.has(Number(tierId));
 
 // ---------- priorities (lower = sooner) ----------
-export const PRIO = { appUser: 1, sweep: 10, groupFetch: 20, clanSeed: 55, history: 40, clanMember: 50, groupMateProfile: 60, clanHop: 70 };
+export const PRIO = { appUser: 1, sweep: 10, groupFetch: 20, history: 40, clanMember: 50, clanSeed: 55, groupMateProfile: 60, clanHop: 70 };
 
-export const stats = { trophyMismatch: 0, battlesInserted: 0 };
+export const stats = { battleRowsWritten: 0, groupCalls: 0 };
 
 // ---------- helpers ----------
+export const seasonEnded = (seasonId: string | number) => Date.now() >= (Number(seasonId) + WEEK) * 1000;
+
 /** API timestamps look like 20261024T061234.000Z; accept ISO too. */
 export function parseApiTime(s: string): string {
   if (s.includes('-')) return new Date(s).toISOString();
@@ -24,6 +35,8 @@ export function parseApiTime(s: string): string {
   if (!m) throw new Error(`Unrecognised timestamp: ${s}`);
   return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}.${m[7] ?? '000'}Z`;
 }
+
+const byKey = <T>(a: [string, T], b: [string, T]) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
 
 async function ensureSeason(c: { query: typeof db.query }, seasonId: string | number) {
   const id = String(seasonId);
@@ -35,8 +48,8 @@ async function ensureSeason(c: { query: typeof db.query }, seasonId: string | nu
 }
 
 /**
- * One battle partition per season. Created OUTSIDE any transaction (creating a partition needs a strong lock on
- * the battle table, which must never be held while other locks are held) and remembered in memory.
+ * One battle partition per season. Created OUTSIDE any transaction (it needs a strong lock on the battle table,
+ * which must never be held together with other locks) and remembered in memory.
  */
 const partitions = new Set<string>();
 async function ensurePartition(seasonId: string | number) {
@@ -58,7 +71,7 @@ async function groupKnown(groupTag: string, seasonId: string | number) {
 
 async function upsertClans(c: { query: typeof db.query }, clans: Map<string, string>) {
   if (!clans.size) return;
-  const rows = [...clans.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); // fixed lock order
+  const rows = [...clans.entries()].sort(byKey); // fixed lock order
   await c.query(
     `INSERT INTO clan (clan_tag, name) SELECT * FROM unnest($1::text[], $2::text[])
      ON CONFLICT (clan_tag) DO UPDATE SET name = EXCLUDED.name, updated_at = now()`,
@@ -67,7 +80,7 @@ async function upsertClans(c: { query: typeof db.query }, clans: Map<string, str
 
 async function upsertPlayers(c: { query: typeof db.query }, players: Map<string, string>) {
   if (!players.size) return;
-  const rows = [...players.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); // fixed lock order
+  const rows = [...players.entries()].sort(byKey); // fixed lock order
   const tags = rows.map(r => r[0]), names = rows.map(r => r[1]);
   await c.query(
     `INSERT INTO player (player_tag, name) SELECT * FROM unnest($1::text[], $2::text[])
@@ -99,7 +112,7 @@ async function enqueueClanHops(clanTags: string[], priority: number, freshDays =
 // ---------- job handlers ----------
 
 /** profile: player row, current group (tier known from profile), history job for the previous group. */
-export async function runProfile(p: { playerTag: string }) {
+export async function runProfile(p: { playerTag: string; full?: boolean }) {
   const tag = normTag(p.playerTag);
   const prof = await getProfileRaw(tag);
   const tierId = prof.leagueTier?.id ?? null;
@@ -113,10 +126,11 @@ export async function runProfile(p: { playerTag: string }) {
   if (prof.clan) await enqueueClanHops([prof.clan.tag], PRIO.clanHop);
 
   if (prof.currentLeagueGroupTag && prof.currentLeagueSeasonId && inScope(tierId)
-      && !(await groupKnown(prof.currentLeagueGroupTag, prof.currentLeagueSeasonId))) {
+      && (p.full || !(await groupKnown(prof.currentLeagueGroupTag, prof.currentLeagueSeasonId)))) {
     await enqueueMany('group_fetch', [{
-      groupTag: prof.currentLeagueGroupTag, seasonId: String(prof.currentLeagueSeasonId), playerTag: tag, tierId: Number(tierId)
-    }], PRIO.groupFetch);
+      groupTag: prof.currentLeagueGroupTag, seasonId: String(prof.currentLeagueSeasonId), playerTag: tag, tierId: Number(tierId),
+      ...(p.full ? { full: true } : {})   // app users: collect battle logs of the running season too
+    }], p.full ? PRIO.appUser : PRIO.groupFetch);
   }
 
   // history gives the tier of the previous season, which the profile does not
@@ -124,7 +138,7 @@ export async function runProfile(p: { playerTag: string }) {
     playerTag: tag,
     previousGroupTag: prof.previousLeagueGroupTag ?? null,
     previousSeasonId: prof.previousLeagueSeasonId ? String(prof.previousLeagueSeasonId) : null
-  }], PRIO.history);
+  }], p.full ? PRIO.appUser : PRIO.history);
 }
 
 /** history_backfill: Layer A (all finished seasons) + previous group if its tier is in scope. */
@@ -171,15 +185,14 @@ export async function runClanMembers(p: { clanTag: string }) {
   await enqueueProfiles(tags, PRIO.clanMember);
 }
 
+type GroupJob = { groupTag: string; seasonId: string; playerTag: string; tierId: number; full?: boolean };
+
 /**
- * group_fetch: one call returns the whole roster plus the attack/defense logs of the REQUESTING player only.
- * So we store the roster, store that player's battles, then queue the other members to collect their logs.
- * Every battle appears in two logs (attacker's and defender's); the PK dedupes them.
+ * Stores one API response: roster, clans, players, and the battles of the player the call was made for.
+ * One call returns the whole roster but the attack/defense logs of that ONE player. Every battle is in two logs
+ * (the attacker's and the defender's), so the primary key merges them.
  */
-export async function runGroupFetch(p: { groupTag: string; seasonId: string; playerTag: string; tierId: number }) {
-  if (!inScope(p.tierId)) return; // Legend (and anything outside Titan..Electro): skip the whole group
-  const res = await getLeagueGroupForPlayer(p.groupTag, p.seasonId, p.playerTag);
-  await ensurePartition(p.seasonId);
+async function storeGroupResponse(p: GroupJob, player: string, res: Awaited<ReturnType<typeof getLeagueGroupForPlayer>>) {
   const members = [...(res.members ?? [])].sort((a, b) => (a.playerTag < b.playerTag ? -1 : a.playerTag > b.playerTag ? 1 : 0));
   const expected = members.reduce((n, m) => n + m.attackWinCount + m.attackLoseCount, 0);
 
@@ -190,23 +203,23 @@ export async function runGroupFetch(p: { groupTag: string; seasonId: string; pla
     players.set(m.playerTag, m.playerName);
   }
 
-  // build battle rows: attack log = this player attacked; defense log = this player was attacked
-  const B = { att: [] as string[], def: [] as string[], time: [] as string[], stars: [] as number[], dest: [] as number[], tro: [] as number[] };
+  // attack log = this player attacked (attacker side value); defense log = this player was attacked (defender side value)
+  const B = { att: [] as string[], def: [] as string[], time: [] as string[], stars: [] as number[], dest: [] as number[],
+              atro: [] as (number | null)[], dtro: [] as (number | null)[] };
   for (const a of res.attackLogs ?? []) {
-    B.att.push(p.playerTag); B.def.push(a.opponentPlayerTag); B.time.push(parseApiTime(a.creationTime));
-    B.stars.push(a.stars); B.dest.push(a.destructionPercentage); B.tro.push(a.trophies);
+    B.att.push(player); B.def.push(a.opponentPlayerTag); B.time.push(parseApiTime(a.creationTime));
+    B.stars.push(a.stars); B.dest.push(a.destructionPercentage); B.atro.push(a.trophies); B.dtro.push(null);
   }
   for (const d of res.defenseLogs ?? []) {
-    B.att.push(d.opponentPlayerTag); B.def.push(p.playerTag); B.time.push(parseApiTime(d.creationTime));
-    B.stars.push(d.stars); B.dest.push(d.destructionPercentage);
-    B.tro.push(40 - d.trophies); // stored value is the attacker's gain; defender's logged change = 40 - gain
+    B.att.push(d.opponentPlayerTag); B.def.push(player); B.time.push(parseApiTime(d.creationTime));
+    B.stars.push(d.stars); B.dest.push(d.destructionPercentage); B.atro.push(null); B.dtro.push(d.trophies);
   }
-
-  // sort battles by primary key so concurrent inserts always take locks in the same order
+  // sort by primary key so concurrent inserts always take locks in the same order
   const order = B.att.map((_, i) => i).sort((i, j) =>
     B.att[i] < B.att[j] ? -1 : B.att[i] > B.att[j] ? 1 : B.def[i] < B.def[j] ? -1 : B.def[i] > B.def[j] ? 1 : B.time[i] < B.time[j] ? -1 : B.time[i] > B.time[j] ? 1 : 0);
   for (const k of Object.keys(B) as (keyof typeof B)[]) (B as any)[k] = order.map(i => (B as any)[k][i]);
 
+  await ensurePartition(p.seasonId);
   await tx(async c => {
     await ensureSeason(c, p.seasonId);
     await c.query(
@@ -228,48 +241,90 @@ export async function runGroupFetch(p: { groupTag: string; seasonId: string; pla
        members.map(m => m.defenseWinCount), members.map(m => m.defenseLoseCount)]);
 
     if (B.att.length) {
+      // first sight inserts the row, the second sight (other side's log) fills in that side's trophy value
       const ins = await c.query(
-        `INSERT INTO battle (season_id, attacker_tag, defender_tag, battle_time, group_tag, stars, destruction, trophies)
-         SELECT $1, a, d, t::timestamptz, $2, s, x, r
-         FROM unnest($3::text[], $4::text[], $5::text[], $6::int[], $7::int[], $8::int[]) AS u(a,d,t,s,x,r)
-         ON CONFLICT (season_id, attacker_tag, defender_tag, battle_time) DO NOTHING
-         RETURNING attacker_tag, defender_tag, battle_time`,
-        [p.seasonId, p.groupTag, B.att, B.def, B.time, B.stars, B.dest, B.tro]);
-      stats.battlesInserted += ins.rowCount ?? 0;
-
-      // Battles already stored from the opponent's side: cross-check the trophy value (validates the 40-x assumption)
-      if ((ins.rowCount ?? 0) < B.att.length) {
-        const cmp = await c.query(
-          `SELECT count(*)::int AS bad FROM unnest($2::text[], $3::text[], $4::text[], $5::int[]) AS u(a,d,t,r)
-           JOIN battle b ON b.season_id=$1 AND b.attacker_tag=u.a AND b.defender_tag=u.d AND b.battle_time=u.t::timestamptz
-           WHERE b.trophies <> u.r`,
-          [p.seasonId, B.att, B.def, B.time, B.tro]);
-        const bad = cmp.rows[0].bad as number;
-        if (bad) { stats.trophyMismatch += bad; console.warn(`! ${bad} trophy mismatches in ${p.groupTag}/${p.seasonId} (check the 40-x assumption)`); }
-      }
+        `INSERT INTO battle (season_id, attacker_tag, defender_tag, battle_time, group_tag, stars, destruction, attacker_trophies, defender_trophies)
+         SELECT $1, a, d, t::timestamptz, $2, s, x, ar, dr
+         FROM unnest($3::text[], $4::text[], $5::text[], $6::int[], $7::int[], $8::int[], $9::int[]) AS u(a,d,t,s,x,ar,dr)
+         ON CONFLICT (season_id, attacker_tag, defender_tag, battle_time) DO UPDATE SET
+           attacker_trophies = COALESCE(battle.attacker_trophies, EXCLUDED.attacker_trophies),
+           defender_trophies = COALESCE(battle.defender_trophies, EXCLUDED.defender_trophies)`,
+        [p.seasonId, p.groupTag, B.att, B.def, B.time, B.stars, B.dest, B.atro, B.dtro]);
+      stats.battleRowsWritten += ins.rowCount ?? 0;
     }
 
     await c.query(
       `UPDATE group_member SET attacks_logged=$4, defenses_logged=$5, logs_fetched_at=now()
        WHERE group_tag=$1 AND season_id=$2 AND player_tag=$3`,
-      [p.groupTag, p.seasonId, p.playerTag, (res.attackLogs ?? []).length, (res.defenseLogs ?? []).length]);
+      [p.groupTag, p.seasonId, player, (res.attackLogs ?? []).length, (res.defenseLogs ?? []).length]);
     await c.query(
       `UPDATE league_group SET stored_battles = (SELECT count(*) FROM battle WHERE season_id=$2 AND group_tag=$1)
        WHERE group_tag=$1 AND season_id=$2`, [p.groupTag, p.seasonId]);
   });
+}
 
-  // queue the other members that actually battled and have no logs yet
-  const { rows: todo } = await db.query(
-    `SELECT player_tag FROM group_member
-     WHERE group_tag=$1 AND season_id=$2 AND logs_fetched_at IS NULL
-       AND attack_wins + attack_losses + defense_wins + defense_losses > 0`, [p.groupTag, p.seasonId]);
-  await enqueueMany('group_fetch', todo.map(r => ({ groupTag: p.groupTag, seasonId: p.seasonId, playerTag: r.player_tag, tierId: p.tierId })), PRIO.groupFetch);
+async function groupCovered(groupTag: string, seasonId: string) {
+  const { rows } = await db.query(
+    'SELECT stored_battles >= expected_battles AS ok FROM league_group WHERE group_tag=$1 AND season_id=$2', [groupTag, seasonId]);
+  return !!rows[0]?.ok;
+}
 
-  // discovery: group-mates' own profiles (their other group) and their clans
-  if ((process.env.DISCOVER_FROM_GROUPS ?? 'true') === 'true') {
-    await enqueueProfiles(members.map(m => m.playerTag), PRIO.groupMateProfile);
-    await enqueueClanHops([...clans.keys()], PRIO.clanHop);
+/** The unvisited member with the most battles whose logs are missing or older than the season end / this run's start. */
+async function nextMember(groupTag: string, seasonId: string, visited: Set<string>, t0: Date): Promise<string | null> {
+  const { rows } = await db.query(
+    `SELECT gm.player_tag
+     FROM group_member gm JOIN season s ON s.season_id = gm.season_id
+     WHERE gm.group_tag = $1 AND gm.season_id = $2
+       AND gm.attack_wins + gm.attack_losses + gm.defense_wins + gm.defense_losses > 0
+       AND NOT (gm.player_tag = ANY($3::text[]))
+       AND (gm.logs_fetched_at IS NULL OR gm.logs_fetched_at < LEAST(s.ends_at, $4::timestamptz))
+     ORDER BY gm.attack_wins + gm.attack_losses + gm.defense_wins + gm.defense_losses DESC, gm.player_tag
+     LIMIT 1`, [groupTag, seasonId, [...visited], t0.toISOString()]);
+  return rows[0]?.player_tag ?? null;
+}
+
+/**
+ * group_fetch (one job per group):
+ *  - season still running: store the roster only (1 call). Battle logs are collected after the season ends,
+ *    because logs fetched mid-week would have to be fetched again anyway. Exceptions: app users (full) or LIVE_LOGS=true.
+ *  - season ended: fetch members one at a time, most active first, and STOP as soon as the stored battles reach the
+ *    roster's expected total. Every battle is in two logs, so this usually needs well under half the members' logs.
+ */
+export async function runGroupFetch(p: GroupJob) {
+  if (!inScope(p.tierId)) return; // Legend (and anything outside Titan..Electro): skip the whole group
+  const ended = seasonEnded(p.seasonId);
+  if (ended && await groupAlreadyComplete(p.groupTag, p.seasonId)) return;
+  const collect = ended || !!p.full || LIVE_LOGS;
+  const t0 = new Date();
+  const visited = new Set<string>();
+
+  let player: string | null = p.playerTag;
+  while (player) {
+    visited.add(player);
+    let res;
+    try {
+      res = await getLeagueGroupForPlayer(p.groupTag, p.seasonId, player);
+    } catch (e: any) {
+      if (player !== p.playerTag && !isRetryable(e)) { player = await nextMember(p.groupTag, p.seasonId, visited, t0); continue; } // skip this member
+      throw e;
+    }
+    stats.groupCalls++;
+    await storeGroupResponse(p, player, res);
+    if (!collect) break;
+    if (!FETCH_ALL_MEMBERS && await groupCovered(p.groupTag, p.seasonId)) break;
+    player = await nextMember(p.groupTag, p.seasonId, visited, t0);
   }
+
+  // group-mates: their clans are crawled (cheap); their own profiles only if asked for
+  const { rows } = await db.query(
+    `SELECT DISTINCT clan_tag, player_tag FROM group_member WHERE group_tag=$1 AND season_id=$2`, [p.groupTag, p.seasonId]);
+  await enqueueClanHops([...new Set(rows.map(r => r.clan_tag).filter(Boolean))], PRIO.clanHop);
+  if (DISCOVER_GROUPMATES) await enqueueProfiles(rows.map(r => r.player_tag), PRIO.groupMateProfile);
+}
+
+async function groupAlreadyComplete(groupTag: string, seasonId: string) {
+  const { rows } = await db.query(`SELECT status FROM league_group WHERE group_tag=$1 AND season_id=$2`, [groupTag, seasonId]);
+  return rows[0]?.status === 'complete';
 }
 
 /** After a group_fetch job is terminal, settle the group's status once no fetches for it remain queued. */

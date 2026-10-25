@@ -13,7 +13,9 @@
     "seed": "tsx src/seed.ts",
     "sweep": "tsx src/sweep.ts",
     "stats": "tsx src/stats.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "trophies": "tsx src/trophies.ts",
+    "inspect": "tsx src/inspect-group.ts"
   },
   "dependencies": {
     "clashofclans.js": "^5.1.0",
