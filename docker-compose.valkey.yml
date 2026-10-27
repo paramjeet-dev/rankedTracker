@@ -1,0 +1,13 @@
+# Merge the `valkey` service and the `valkey-data` volume into your existing docker-compose.yml
+services:
+  valkey:
+    image: valkey/valkey:8-alpine
+    command: ["valkey-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - valkey-data:/data
+    restart: unless-stopped
+
+volumes:
+  valkey-data:

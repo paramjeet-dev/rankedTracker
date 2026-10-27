@@ -13,14 +13,24 @@
     "seed": "tsx src/seed.ts",
     "sweep": "tsx src/sweep.ts",
     "stats": "tsx src/stats.ts",
-    "typecheck": "tsc --noEmit",
     "trophies": "tsx src/trophies.ts",
-    "inspect": "tsx src/inspect-group.ts"
+    "inspect": "tsx src/inspect-group.ts",
+    "availability": "tsx src/processes/availability.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "migrate": "tsx src/processes/migrate.ts",
+    "discovery": "tsx src/processes/players-discovery.ts",
+    "profile": "tsx src/processes/players-profile.ts",
+    "groups": "tsx src/processes/groups.ts",
+    "battles": "tsx src/processes/battles.ts",
+    "seed-clans": "tsx src/processes/seed-clans.ts",
+    "import-queue": "tsx src/processes/import-legacy-queue.ts"
   },
   "dependencies": {
     "clashofclans.js": "^5.1.0",
     "dotenv": "^16.4.5",
-    "pg": "^8.12.0"
+    "pg": "^8.12.0",
+    "ioredis": "^6.3.2"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
