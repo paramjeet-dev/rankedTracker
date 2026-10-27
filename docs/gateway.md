@@ -18,7 +18,7 @@ gate.waitOpen -> pacer.acquire (in-flight permit + evenly spaced start slot) -> 
 | --- | --- | --- | --- | --- |
 | unavailable | HTML body (`Unexpected token '<'`), 502/504, ECONNRESET | closes | after reopen, up to `maxGateRetries` (5) | no |
 | maintenance | 503 inMaintenance | closes | same | no |
-| auth | 403 accessDenied.invalidIp | closes, triggers re-login | same | no |
+| auth | 403 accessDenied.invalidIp | closes this process's gate, asks the key manager for new keys, reopens when they arrive | same | no |
 | throttled | 429 | open, rate halves | backoff, up to `maxAttempts` (4) | yes |
 | timeout | aborted, headers/body timeout | open, rate halves | backoff | yes |
 | server | 500 unknownException, truncated JSON | open | backoff | yes |
@@ -37,7 +37,8 @@ as a bare `SyntaxError` with no status. The classifier recognises that signature
 
 - `restRequestTimeout` is set (15 s). The library default of 0 means a hung connection waits forever.
 - `retryLimit: 0`. The library's own retry re-logs-in on every 403 invalid-IP, which with many workers means many
-  simultaneous logins. Re-login is done once, single-flight, at most once per minute.
+  simultaneous logins. Only `availability` logs in (see [keys.md](keys.md)); a process that gets a 403 asks it for new
+  keys, waits, reopens its own gate and retries.
 
 ## Pacing
 

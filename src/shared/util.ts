@@ -38,3 +38,20 @@ export function singleFlight(fn: () => Promise<void>, minIntervalMs = 0): () => 
     return inFlight;
   };
 }
+
+/** Run fn, retrying with exponential backoff. Used for logins, which fail with "Temporary application error" under load. */
+export async function retry<T>(
+  fn: () => Promise<T>,
+  opts: { attempts: number; baseMs?: number; capMs?: number; signal?: AbortSignal; onRetry?: (err: unknown, attempt: number, waitMs: number) => void }
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= opts.attempts || opts.signal?.aborted) throw err;
+      const wait = backoffMs(attempt, opts.baseMs ?? 3_000, opts.capMs ?? 60_000);
+      opts.onRetry?.(err, attempt, wait);
+      if (!(await sleep(wait, opts.signal))) throw err;
+    }
+  }
+}

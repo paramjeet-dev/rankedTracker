@@ -9,7 +9,7 @@ import { Metrics, startMetricsReporter } from '../shared/metrics.js';
 import { Pacer } from '../shared/pacer.js';
 import { runProcess } from '../shared/process.js';
 import { loadScope } from '../shared/scope.js';
-import { createValkey } from '../shared/valkey.js';
+import { asKv, createValkey } from '../shared/valkey.js';
 
 /** See docs/battles.md. */
 void runProcess('battles', async ({ signal, log }) => {
@@ -28,7 +28,7 @@ void runProcess('battles', async ({ signal, log }) => {
   const gate = new AvailabilityGate(valkey);
   gate.start();
   const metrics = new Metrics();
-  const { client, relogin } = await createClashClient();
+  const { client, relogin, close: stopKeys } = await createClashClient(asKv(valkey), signal);
   const gateway = new ClashGateway({ client, gate, metrics, pacers, relogin });
   const stopReporter = startMetricsReporter({ processName: 'battles', metrics, pacers, valkey });
 
@@ -62,6 +62,7 @@ void runProcess('battles', async ({ signal, log }) => {
   clearInterval(progress);
   stopReporter();
   gate.stop();
+  stopKeys();
   valkey.disconnect();
   await pg.end();
 });

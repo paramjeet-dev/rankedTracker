@@ -17,7 +17,7 @@ client.getLocations({ limit: 1 })
   -> success                         : available
   -> 429 requestThrottled            : available (reachable but busy; the pacer slows down, not the gate)
   -> 503 / inMaintenance / 500 with a maintenance message : official maintenance
-  -> 403 / accessDenied              : auth problem -> re-login (single flight, at most once a minute)
+  -> 403 / accessDenied              : auth problem -> log in again and publish the new key set (at most every 20 s)
   -> HTML body, 502/504, network error, timeout            : proxy / network outage
 ```
 
@@ -59,6 +59,11 @@ Clash credentials (`CLASH_EMAIL`, `CLASH_PASSWORD`).
 If the controller restarts mid-outage, workers stay paused until a healthy heartbeat arrives (or the half-open
 trial fires). Maintenance history is not stored. The ranked tracker has no war clocks, so the only recovery
 action is the event.
+
+## Key manager
+
+This process is also the only one that logs in to the developer portal and publishes the API keys to Valkey; see
+[keys.md](keys.md). Start it first.
 
 ## What it deliberately does not do
 

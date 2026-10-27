@@ -12,6 +12,8 @@ export interface GateOptions {
   controllerStaleMs?: number;
   /** With no controller, reopen on this cadence and let live traffic act as the probe. */
   halfOpenMs?: number;
+  /** An auth closure normally ends when this process switched to new keys; this is the safety net if that never happens. */
+  authHoldMs?: number;
   clock?: () => number;
 }
 
@@ -33,6 +35,7 @@ export class AvailabilityGate {
   private readonly pollMs: number;
   private readonly staleMs: number;
   private readonly halfOpenMs: number;
+  private readonly authHoldMs: number;
   private readonly clock: () => number;
 
   constructor(
@@ -42,6 +45,7 @@ export class AvailabilityGate {
     this.pollMs = opts.pollMs ?? 2_000;
     this.staleMs = opts.controllerStaleMs ?? 45_000;
     this.halfOpenMs = opts.halfOpenMs ?? 30_000;
+    this.authHoldMs = opts.authHoldMs ?? 60_000;
     this.clock = opts.clock ?? Date.now;
   }
 
@@ -101,8 +105,15 @@ export class AvailabilityGate {
 
     if (this.closedAt === null) {
       if (fresh && state && !state.available) {
-        this.close(state.maintenance ? 'maintenance' : (state.reason ?? 'unavailable'));
+        // A controller-reported key problem is not this process's own "auth" closure: it ends on a healthy heartbeat.
+        this.close(state.maintenance ? 'maintenance' : 'unavailable');
       }
+      return;
+    }
+    if (this.closedReason === 'auth') {
+      // Closed because THIS process's keys were rejected. A healthy controller heartbeat says nothing about them:
+      // the gateway reopens the gate once it has switched to new keys (reopen()).
+      if (now - this.closedAt >= this.authHoldMs) this.open('auth hold elapsed, trial reopen');
       return;
     }
     if (fresh && state?.available && state.heartbeat > this.closedAt) {
@@ -111,6 +122,11 @@ export class AvailabilityGate {
     if (!fresh && now - this.closedAt >= this.halfOpenMs) {
       return this.open('no controller heartbeat, trial reopen');
     }
+  }
+
+  /** Reopen explicitly, e.g. after this process switched to a fresh key set. No-op when already open. */
+  reopen(why: string): void {
+    if (this.closedAt !== null) this.open(why);
   }
 
   private open(why: string): void {

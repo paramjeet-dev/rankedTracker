@@ -5,35 +5,65 @@ import type { AvailabilityGate } from './gate.js';
 import { createLogger } from './logger.js';
 import type { Metrics } from './metrics.js';
 import type { Pacer } from './pacer.js';
-import { backoffMs, singleFlight, sleep } from './util.js';
+import { KeyFollower, KeyManager, type KV } from './keys.js';
+import { backoffMs, retry, sleep } from './util.js';
 
 const log = createLogger('clash');
 
 /**
- * Create the library client.
+ * Create the library client in one of two modes (CLASH_KEYS_MODE):
+ *  - "shared" (default): follow the key set that `availability` publishes to Valkey. This process never logs in, so it
+ *    can never revoke another process's keys.
+ *  - "login": log in directly (the old behaviour). Only safe when this is the ONLY process using the account.
  *
- * retryLimit is 0 on purpose: the library's own retry also re-logs-in per request on a 403 invalid-IP,
- * which with many workers means many simultaneous logins. We handle retries and re-login ourselves,
- * once, in the gateway. restRequestTimeout must be set: the library default (0) means "never time out".
+ * retryLimit is 0 on purpose: the library's own retry re-logs-in per request on a 403, which is exactly what must not
+ * happen with many workers. restRequestTimeout must be set: the library default (0) means "never time out".
  */
-export async function createClashClient(): Promise<{ client: Client; relogin: () => Promise<void> }> {
+export async function createClashClient(
+  valkey: KV,
+  signal?: AbortSignal
+): Promise<{ client: Client; relogin: () => Promise<void>; close: () => void }> {
+  if (config.clash.keysMode === 'login') {
+    const { client, manager } = await createLoginClient(valkey, false, signal);
+    return { client, relogin: () => manager.relogin('rejected keys'), close: () => undefined };
+  }
   const client = new Client({ restRequestTimeout: config.clash.requestTimeoutMs, retryLimit: 0 });
-  const login = async () => {
-    await client.login({
+  const follower = new KeyFollower(valkey, (keys) => void client.rest.requestHandler.setKeys(keys), { log });
+  await follower.waitForInitial(signal);
+  const stop = follower.watch();
+  return { client, relogin: () => follower.recover(), close: stop };
+}
+
+/**
+ * The login client used by `availability` (the key manager). It logs in with retries, then publishes the keys.
+ * `publish: false` keeps the keys local (CLASH_KEYS_MODE=login).
+ */
+export async function createLoginClient(
+  valkey: KV,
+  publish = true,
+  signal?: AbortSignal
+): Promise<{ client: Client; manager: KeyManager }> {
+  const client = new Client({ restRequestTimeout: config.clash.requestTimeoutMs, retryLimit: 0 });
+  const login = async (): Promise<string[]> =>
+    client.login({
       email: config.clash.email,
       password: config.clash.password,
       keyName: config.clash.keyName,
       keyCount: config.clash.keyCount
     });
-  };
-  await login();
-  // One login at most per minute, shared by all concurrent callers.
-  const relogin = singleFlight(async () => {
-    log.warn('re-validating keys / logging in again');
-    await login();
-    log.info('re-login complete');
-  }, 60_000);
-  return { client, relogin };
+  const sink: KV = publish ? valkey : memoryKv();
+  const manager = new KeyManager(sink, login, { log });
+  await retry(() => manager.init(), {
+    attempts: 8,
+    ...(signal && { signal }),
+    onRetry: (err, attempt, wait) => log.warn(`login failed (attempt ${attempt}), retrying in ${Math.round(wait / 1000)}s: ${(err as Error).message.slice(0, 160)}`)
+  });
+  return { client, manager };
+}
+
+function memoryKv(): KV {
+  const m = new Map<string, string>();
+  return { get: async (k) => m.get(k) ?? null, set: async (k, v) => void m.set(k, v), del: async (k) => void m.delete(k) };
 }
 
 export type CallResult<T> =
@@ -67,6 +97,17 @@ export interface GatewayDeps {
 export class ClashGateway {
   constructor(private readonly deps: GatewayDeps) {}
 
+  /** This process's keys were rejected: get new ones, then reopen this process's gate. */
+  private async recoverKeys(): Promise<void> {
+    if (!this.deps.relogin) return;
+    try {
+      await this.deps.relogin();
+      this.deps.gate.reopen('keys refreshed');
+    } catch (e) {
+      log.error('could not get new keys; the gate stays closed until the auth hold elapses', e);
+    }
+  }
+
   async call<T>(pool: string, fn: (client: Client) => Promise<T>, opts: CallOptions = {}): Promise<CallResult<T>> {
     const pacer = this.deps.pacers[pool];
     if (!pacer) throw new Error(`Unknown pool "${pool}". Register a Pacer for it first.`);
@@ -97,7 +138,9 @@ export class ClashGateway {
         if (c.pressure) pacer.onPressure();
         if (c.closesGate) {
           this.deps.gate.close(c.kind);
-          if (c.kind === 'auth') this.deps.relogin?.().catch((e) => log.error('re-login failed', e));
+          // Start getting new keys right away (single flight inside the key follower). Calls waiting at the gate wake
+          // up when it reopens, including this one if it is retried.
+          if (c.kind === 'auth') void this.recoverKeys();
         }
         attempts++;
         const fail = (): CallResult<T> => ({

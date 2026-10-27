@@ -79,3 +79,42 @@ test('waitOpen returns when aborted', async () => {
   ac.abort();
   await p;
 });
+
+test('a gate closed for this process\'s own rejected keys ignores a healthy heartbeat and reopens only explicitly', async () => {
+  let t = 10_000;
+  let state: AvailabilityState | null = null;
+  const kv = { get: async () => (state ? JSON.stringify(state) : null) };
+  const gate = new AvailabilityGate(kv, { clock: () => t, authHoldMs: 60_000 });
+  gate.close('auth');
+  t += 5_000;
+  state = { available: true, maintenance: false, since: t, heartbeat: t };
+  await gate.refresh();
+  assert.equal(gate.isOpen, false, 'a healthy controller says nothing about this process\'s keys');
+  gate.reopen('keys refreshed');
+  assert.equal(gate.isOpen, true);
+});
+
+test('an auth closure still ends after the auth hold, so a dead key manager cannot freeze a process', async () => {
+  let t = 10_000;
+  const gate = new AvailabilityGate({ get: async () => null }, { clock: () => t, authHoldMs: 60_000 });
+  gate.close('auth');
+  t += 59_000;
+  await gate.refresh();
+  assert.equal(gate.isOpen, false);
+  t += 2_000;
+  await gate.refresh();
+  assert.equal(gate.isOpen, true);
+});
+
+test('a controller reporting an auth problem closes gates as a normal outage (healthy heartbeat reopens), not as an own-keys closure', async () => {
+  let t = 10_000;
+  let state: AvailabilityState | null = { available: false, maintenance: false, reason: 'auth', since: t, heartbeat: t };
+  const gate = new AvailabilityGate({ get: async () => (state ? JSON.stringify(state) : null) }, { clock: () => t });
+  await gate.refresh();
+  assert.equal(gate.isOpen, false);
+  assert.equal(gate.reason, 'unavailable');
+  t += 15_000;
+  state = { available: true, maintenance: false, since: t, heartbeat: t };
+  await gate.refresh();
+  assert.equal(gate.isOpen, true);
+});

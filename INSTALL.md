@@ -56,15 +56,18 @@ Seasons must be "id = start time, 7 days long", `league_tier` must have the Tita
    npm run import-queue            # dry run: shows how many tags have no row
    npm run import-queue -- --apply
    ```
-3. Start the processes, each in its own terminal:
+3. Clean up the developer keys once: open https://developer.clashofclans.com, and delete the keys you do not need (the
+   account allows 10 in total; unused ones from other names or old IPs block new ones).
+4. Start `availability` FIRST, in its own terminal, and wait for `published key set v1 (N keys)`. It is the only
+   process that logs in; the others follow its keys (see `docs/keys.md`). Then, each in its own terminal:
    ```
-   npm run availability
    npm run discovery
    npm run profile
    npm run groups
    npm run battles
    ```
-4. To seed a fresh database (or add more clans), `npm run seed-clans` replaces `npm run seed`: it writes the top clans
+   If your public IP changes every few minutes, see "If the IP itself keeps changing" in `docs/keys.md`.
+5. To seed a fresh database (or add more clans), `npm run seed-clans` replaces `npm run seed`: it writes the top clans
    of every country straight into `clan`. Priority app users are deferred until you have some.
 
 Defaults: discovery 10 requests/s (about 4.4 h for 158,695 clans), profile 12 calls/s (about 8 h for 180,000 players,

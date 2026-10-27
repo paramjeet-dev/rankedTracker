@@ -10,6 +10,7 @@ PostgreSQL contracts, Valkey keys, and the availability gate. They do not share 
 | --- | --- | --- |
 | Availability and maintenance | [availability.md](availability.md) | implemented |
 | Request gateway (shared layer) | [gateway.md](gateway.md) | implemented |
+| API keys (one login owner) | [keys.md](keys.md) | implemented |
 | Player discovery | [players-discovery.md](players-discovery.md) | implemented (Phase B) |
 | Player profiles and season history | [players-profile.md](players-profile.md) | implemented (Phase C) |
 | League groups (registration) | [groups.md](groups.md) | implemented (Phase D) |

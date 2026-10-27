@@ -5,7 +5,7 @@ import { AvailabilityGate } from '../shared/gate.js';
 import { Metrics } from '../shared/metrics.js';
 import { Pacer } from '../shared/pacer.js';
 import { runProcess } from '../shared/process.js';
-import { createValkey } from '../shared/valkey.js';
+import { asKv, createValkey } from '../shared/valkey.js';
 
 /**
  * Seeds `clan` with the top clans of every country and the global ranking (replaces `npm run seed` for clans).
@@ -21,7 +21,7 @@ void runProcess('seed-clans', async ({ log, signal }) => {
   const valkey = createValkey();
   const gate = new AvailabilityGate(valkey);
   gate.start();
-  const { client, relogin } = await createClashClient();
+  const { client, relogin, close: stopKeys } = await createClashClient(asKv(valkey), signal);
   const gateway = new ClashGateway({ client, gate, metrics: new Metrics(), pacers: { seed: new Pacer({ rps: 5, maxInFlight: 5 }) }, relogin });
 
   try {
@@ -43,6 +43,7 @@ void runProcess('seed-clans', async ({ log, signal }) => {
     log.info(`${seen.size} clans from ${ids.length} locations; ${added} were new`);
   } finally {
     gate.stop();
+    stopKeys();
     valkey.disconnect();
     await pg.end();
   }

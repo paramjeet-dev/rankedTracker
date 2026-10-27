@@ -103,3 +103,44 @@ test('metrics break failures down by kind:status:reason', async () => {
   assert.deepEqual(s.topErrors, [['not_found:404:notFound', 1]]);
   t.stop();
 });
+
+test('a 403 makes the gateway get new keys, reopen its own gate, and retry the same request successfully', async () => {
+  const neverHealthy = { get: async () => null };
+  const gate = new AvailabilityGate(neverHealthy, { pollMs: 10, authHoldMs: 60_000 });
+  gate.start();
+  let refreshed = 0;
+  const gateway = new ClashGateway({
+    client: {} as Client, gate, metrics: new Metrics(), pacers: { test: new Pacer({ rps: 1000, maxInFlight: 4 }) },
+    relogin: async () => void refreshed++
+  });
+  let calls = 0;
+  const res = await gateway.call('test', async () => {
+    if (++calls === 1) throw Object.assign(new Error('Invalid authorization: API key does not allow access from IP 1.2.3.4'), { status: 403, reason: 'accessDenied.invalidIp' });
+    return 'payload';
+  });
+  assert.equal(res.ok, true);
+  assert.deepEqual([calls, refreshed], [2, 1]);
+  gate.stop();
+});
+
+test('when new keys cannot be obtained the call ends with a bounded, non-permanent failure instead of looping', async () => {
+  const gate = new AvailabilityGate({ get: async () => null }, { pollMs: 10, authHoldMs: 25 });
+  gate.start();
+  const keepAlive = setInterval(() => undefined, 50); // the gate's poll timer is unref'd; real processes have other handles
+  try {
+    let refreshes = 0;
+    const gateway = new ClashGateway({
+      client: {} as Client, gate, metrics: new Metrics(), pacers: { test: new Pacer({ rps: 1000, maxInFlight: 4 }) },
+      relogin: async () => { refreshes++; throw new Error('key manager is down'); }
+    });
+    let calls = 0;
+    const res = await gateway.call('test', async () => { calls++; throw Object.assign(new Error('x'), { status: 403, reason: 'accessDenied' }); }, { maxGateRetries: 2 });
+    assert.equal(res.ok, false);
+    if (!res.ok) assert.deepEqual([res.kind, res.permanent], ['auth', false]);
+    assert.equal(calls, 3);
+    assert.equal(refreshes, 3, 'every rejection asks for new keys, including the last one');
+  } finally {
+    clearInterval(keepAlive);
+    gate.stop();
+  }
+});

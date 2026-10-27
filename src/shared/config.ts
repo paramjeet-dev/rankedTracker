@@ -62,6 +62,10 @@ export const config = {
     get keyName(): string {
       return env('CLASH_KEY_NAME', 'clashofclans.js.keys');
     },
+    /** "shared": follow the keys `availability` publishes (default). "login": log in directly (single process only). */
+    get keysMode(): 'shared' | 'login' {
+      return env('CLASH_KEYS_MODE', 'shared') === 'login' ? 'login' : 'shared';
+    },
     get keyCount(): number {
       return Number(envAny(['CLASH_KEY_COUNT', 'COC_KEY_COUNT'], '1'));
     },
