@@ -32,3 +32,5 @@ PostgreSQL contracts, Valkey keys, and the availability gate. They do not share 
    increase `fail_count`.
 6. **Writes are idempotent and change-detected.** Only changed columns are written. Restarting at any point is safe.
 7. **Rate is a request-start budget per pool**, not a worker count (`POOL_<NAME>_RPS`, `POOL_<NAME>_MAX_IN_FLIGHT`).
+
+- [proxy.md](proxy.md): send Clash traffic through a VPS so a changing home IP cannot invalidate the API keys.

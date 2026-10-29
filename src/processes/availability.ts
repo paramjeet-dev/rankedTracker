@@ -3,6 +3,7 @@ import { createLoginClient } from '../shared/clash.js';
 import { config } from '../shared/config.js';
 import { AvailabilityController } from '../shared/controller.js';
 import { runProcess } from '../shared/process.js';
+import { egressIp, proxyUrl } from '../shared/proxy.js';
 import { sleep } from '../shared/util.js';
 import { asKv, createValkey } from '../shared/valkey.js';
 
@@ -15,6 +16,12 @@ import { asKv, createValkey } from '../shared/valkey.js';
  */
 void runProcess('availability', async ({ signal, log }) => {
   const valkey = createValkey();
+  // Log the address Clash will see before logging in: keys are created for exactly this IP.
+  try {
+    log.info(`egress IP (what Clash sees): ${await egressIp()}${proxyUrl() ? ' via proxy' : ''}`);
+  } catch (err) {
+    log.warn(`could not determine the egress IP${proxyUrl() ? ' (is the proxy tunnel running?)' : ''}: ${(err as Error).message.slice(0, 120)}`);
+  }
   const { client, manager } = await createLoginClient(asKv(valkey), true, signal);
 
   const controller = new AvailabilityController({

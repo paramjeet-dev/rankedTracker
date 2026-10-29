@@ -24,7 +24,8 @@
     "groups": "tsx src/processes/groups.ts",
     "battles": "tsx src/processes/battles.ts",
     "seed-clans": "tsx src/processes/seed-clans.ts",
-    "import-queue": "tsx src/processes/import-legacy-queue.ts"
+    "import-queue": "tsx src/processes/import-legacy-queue.ts",
+    "egress": "tsx src/processes/egress.ts"
   },
   "dependencies": {
     "clashofclans.js": "^5.1.0",

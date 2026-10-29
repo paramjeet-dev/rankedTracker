@@ -6,6 +6,7 @@ import { createLogger } from './logger.js';
 import type { Metrics } from './metrics.js';
 import type { Pacer } from './pacer.js';
 import { KeyFollower, KeyManager, type KV } from './keys.js';
+import { applyOutboundProxy } from './proxy.js';
 import { backoffMs, retry, sleep } from './util.js';
 
 const log = createLogger('clash');
@@ -28,6 +29,7 @@ export async function createClashClient(
     return { client, relogin: () => manager.relogin('rejected keys'), close: () => undefined };
   }
   const client = new Client({ restRequestTimeout: config.clash.requestTimeoutMs, retryLimit: 0 });
+  applyOutboundProxy(client);
   const follower = new KeyFollower(valkey, (keys) => void client.rest.requestHandler.setKeys(keys), { log });
   await follower.waitForInitial(signal);
   const stop = follower.watch();
@@ -44,6 +46,7 @@ export async function createLoginClient(
   signal?: AbortSignal
 ): Promise<{ client: Client; manager: KeyManager }> {
   const client = new Client({ restRequestTimeout: config.clash.requestTimeoutMs, retryLimit: 0 });
+  applyOutboundProxy(client);
   const login = async (): Promise<string[]> =>
     client.login({
       email: config.clash.email,
