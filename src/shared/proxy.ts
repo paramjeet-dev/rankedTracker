@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { ProxyAgent, Socks5ProxyAgent, fetch, setGlobalDispatcher, type Dispatcher } from 'undici';
+import { ProxyAgent, Socks5ProxyAgent, fetch, interceptors, setGlobalDispatcher, type Dispatcher } from 'undici';
 import type { Client } from 'clashofclans.js';
 import { createLogger } from './logger.js';
 
@@ -43,30 +43,66 @@ function dispatcherFor(url: string): Dispatcher {
   return installed.d;
 }
 
+/** CLASH_COMPRESSION=false turns response compression off (default on: the API serves gzip, which is ~10x smaller). */
+export function compressionEnabled(): boolean {
+  return process.env['CLASH_COMPRESSION']?.trim().toLowerCase() !== 'false';
+}
+
+const ACCEPT_ENCODING = 'gzip, deflate';
+
+function withAcceptEncoding(headers: unknown): unknown {
+  if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
+    return { 'accept-encoding': ACCEPT_ENCODING, ...(headers as Record<string, unknown>) };
+  }
+  return headers;
+}
+
+let announced = false;
+
 /**
- * Routes this process's Clash traffic through the proxy. The library uses two paths and both must go through it:
- *  1. login / key list / key create / IP check use the global fetch dispatcher;
- *  2. API requests use a connection pool the library builds for api.clashofclans.com (replaced here).
- * Returns false when no proxy is configured (nothing changes).
+ * Prepares how this process talks to the Clash API. Two independent things, both done by replacing the one object the
+ * library sends API requests through (`requestHandler.dispatcher`, a connection pool bound to api.clashofclans.com):
+ *  - compression: ask for gzip and unpack it before the library reads the JSON (the API supports it; JSON shrinks a lot);
+ *  - proxy (OUTBOUND_PROXY_URL): send the requests, and the developer-portal requests that use the global fetch
+ *    dispatcher (login, key list, key create, IP check), through a proxy with a fixed IP.
+ * Returns what was enabled; with neither, nothing is changed.
  */
-export function applyOutboundProxy(client: Client): boolean {
-  const url = proxyUrl();
-  if (!url) return false;
-  const d = dispatcherFor(url);
-  setGlobalDispatcher(d);
+export function applyClashTransport(client: Client, opts: { ignoreProxy?: boolean } = {}): { proxy: boolean; compression: boolean } {
+  const url = opts.ignoreProxy ? null : proxyUrl();
+  const compression = compressionEnabled();
+  if (!url && !compression) return { proxy: false, compression: false };
 
   const handler = client.rest.requestHandler as unknown as { dispatcher?: unknown };
   if (!('dispatcher' in handler)) {
-    throw new Error('Unsupported clashofclans.js version: no request dispatcher to route through the proxy');
+    throw new Error('Unsupported clashofclans.js version: no request dispatcher to wrap');
   }
-  // The library only calls dispatcher.request({ path, ... }) on a pool bound to one origin; add the origin.
+
+  let base: Dispatcher;
+  let origin: string | undefined;
+  if (url) {
+    base = dispatcherFor(url);
+    setGlobalDispatcher(base); // portal login and key management
+    origin = API_ORIGIN;       // a proxy dispatcher is not bound to one origin, the library's pool is
+  } else {
+    base = handler.dispatcher as Dispatcher; // the library's own pool, already bound to the API origin
+  }
+  const target = compression ? base.compose(interceptors.decompress()) : base;
+
   handler.dispatcher = {
-    request: (opts: Record<string, unknown>) => d.request({ ...opts, origin: API_ORIGIN } as Dispatcher.RequestOptions),
-    close: () => d.close(),
-    destroy: () => d.destroy()
+    request: (opts: Record<string, unknown>) =>
+      target.request({
+        ...opts,
+        ...(origin ? { origin } : {}),
+        ...(compression ? { headers: withAcceptEncoding(opts['headers']) } : {})
+      } as Dispatcher.RequestOptions),
+    close: () => base.close(),
+    destroy: () => base.destroy()
   };
-  log.info(`routing Clash traffic through ${describeProxy(url)}`);
-  return true;
+  if (!announced) {
+    announced = true;
+    log.info(`Clash transport: proxy ${url ? describeProxy(url) : 'off'}, compression ${compression ? 'on' : 'off'}`);
+  }
+  return { proxy: !!url, compression };
 }
 
 /** The public IP Clash will see, through the proxy when one is configured. */

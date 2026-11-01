@@ -6,10 +6,31 @@ import { createLogger } from './logger.js';
 import type { Metrics } from './metrics.js';
 import type { Pacer } from './pacer.js';
 import { KeyFollower, KeyManager, type KV } from './keys.js';
-import { applyOutboundProxy } from './proxy.js';
+import { applyClashTransport } from './proxy.js';
 import { backoffMs, retry, sleep } from './util.js';
 
 const log = createLogger('clash');
+
+/** Thrown by `relogin` in gateway mode: the keys live on the gateway, there is nothing to refresh from here. */
+export class GatewayKeysError extends Error {
+  constructor() {
+    super('keys are held by the gateway (CLASH_BASE_URL); fix them there');
+    this.name = 'GatewayKeysError';
+  }
+}
+
+/** The part of KeyManager that `availability` uses. */
+export type KeyManagerLike = Pick<KeyManager, 'relogin' | 'pollRefresh' | 'currentVersion'>;
+
+/** A client that sends everything to the gateway. The key is a placeholder: the gateway replaces the Authorization header. */
+function createGatewayClient(baseUrl: string): Client {
+  const client = new Client({ baseURL: baseUrl, restRequestTimeout: config.clash.requestTimeoutMs, retryLimit: 0 });
+  client.rest.requestHandler.setKeys(['via-gateway']);
+  if (process.env['OUTBOUND_PROXY_URL']?.trim()) log.warn('OUTBOUND_PROXY_URL is ignored in gateway mode (CLASH_BASE_URL is set)');
+  applyClashTransport(client, { ignoreProxy: true });
+  log.info(`gateway mode: Clash requests go to ${baseUrl}`);
+  return client;
+}
 
 /**
  * Create the library client in one of two modes (CLASH_KEYS_MODE):
@@ -24,12 +45,20 @@ export async function createClashClient(
   valkey: KV,
   signal?: AbortSignal
 ): Promise<{ client: Client; relogin: () => Promise<void>; close: () => void }> {
+  const gatewayUrl = config.clash.baseUrl;
+  if (gatewayUrl) {
+    return {
+      client: createGatewayClient(gatewayUrl),
+      relogin: () => Promise.reject(new GatewayKeysError()),
+      close: () => undefined
+    };
+  }
   if (config.clash.keysMode === 'login') {
     const { client, manager } = await createLoginClient(valkey, false, signal);
     return { client, relogin: () => manager.relogin('rejected keys'), close: () => undefined };
   }
   const client = new Client({ restRequestTimeout: config.clash.requestTimeoutMs, retryLimit: 0 });
-  applyOutboundProxy(client);
+  applyClashTransport(client);
   const follower = new KeyFollower(valkey, (keys) => void client.rest.requestHandler.setKeys(keys), { log });
   await follower.waitForInitial(signal);
   const stop = follower.watch();
@@ -44,9 +73,15 @@ export async function createLoginClient(
   valkey: KV,
   publish = true,
   signal?: AbortSignal
-): Promise<{ client: Client; manager: KeyManager }> {
+): Promise<{ client: Client; manager: KeyManagerLike }> {
+  const gatewayUrl = config.clash.baseUrl;
+  if (gatewayUrl) {
+    const noop = async (): Promise<boolean> => false;
+    const manager: KeyManagerLike = { relogin: async () => undefined, pollRefresh: noop, currentVersion: 0 };
+    return { client: createGatewayClient(gatewayUrl), manager };
+  }
   const client = new Client({ restRequestTimeout: config.clash.requestTimeoutMs, retryLimit: 0 });
-  applyOutboundProxy(client);
+  applyClashTransport(client);
   const login = async (): Promise<string[]> =>
     client.login({
       email: config.clash.email,
@@ -107,6 +142,8 @@ export class ClashGateway {
       await this.deps.relogin();
       this.deps.gate.reopen('keys refreshed');
     } catch (e) {
+      // Gateway mode: nothing to refresh here. The gate stays closed until `availability` sees a healthy probe.
+      if (e instanceof GatewayKeysError) return;
       log.error('could not get new keys; the gate stays closed until the auth hold elapses', e);
     }
   }

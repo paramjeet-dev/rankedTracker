@@ -34,3 +34,4 @@ PostgreSQL contracts, Valkey keys, and the availability gate. They do not share 
 7. **Rate is a request-start budget per pool**, not a worker count (`POOL_<NAME>_RPS`, `POOL_<NAME>_MAX_IN_FLIGHT`).
 
 - [proxy.md](proxy.md): send Clash traffic through a VPS so a changing home IP cannot invalidate the API keys.
+- [clashking-proxy.md](clashking-proxy.md): gateway mode, run ClashKingProxy on the VPS (fixed IP, low latency, rate presets).

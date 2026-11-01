@@ -62,6 +62,14 @@ export const config = {
     get keyName(): string {
       return env('CLASH_KEY_NAME', 'clashofclans.js.keys');
     },
+    /**
+     * Gateway mode (CLASH_BASE_URL, e.g. http://127.0.0.1:8011/v1): requests go to a proxy such as ClashKingProxy that holds
+     * the API keys itself. No developer-portal login, no key sets, no IP-bound keys on this machine. See docs/clashking-proxy.md.
+     */
+    get baseUrl(): string | null {
+      const raw = process.env['CLASH_BASE_URL']?.trim();
+      return raw ? raw.replace(/\/+$/, '') : null;
+    },
     /** "shared": follow the keys `availability` publishes (default). "login": log in directly (single process only). */
     get keysMode(): 'shared' | 'login' {
       return env('CLASH_KEYS_MODE', 'shared') === 'login' ? 'login' : 'shared';
@@ -92,6 +100,11 @@ export const config = {
   },
   availability: {
     probeIntervalMs: 15_000,
+    /** A network/gateway probe failure is retried this many times (1.5 s apart) before the gate closes. */
+    get probeRetries(): number {
+      return envNumber('AVAILABILITY_PROBE_RETRIES', 2);
+    },
+    probeRetryDelayMs: 1_500,
     /** State key lifetime: if the controller dies, the key disappears after this long. */
     stateTtlSeconds: 45
   }

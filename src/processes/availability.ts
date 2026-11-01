@@ -16,17 +16,23 @@ import { asKv, createValkey } from '../shared/valkey.js';
  */
 void runProcess('availability', async ({ signal, log }) => {
   const valkey = createValkey();
-  // Log the address Clash will see before logging in: keys are created for exactly this IP.
-  try {
-    log.info(`egress IP (what Clash sees): ${await egressIp()}${proxyUrl() ? ' via proxy' : ''}`);
-  } catch (err) {
-    log.warn(`could not determine the egress IP${proxyUrl() ? ' (is the proxy tunnel running?)' : ''}: ${(err as Error).message.slice(0, 120)}`);
+  if (config.clash.baseUrl) {
+    log.info(`gateway mode (${config.clash.baseUrl}): the keys and the IP Clash sees belong to the gateway, no login happens here`);
+  } else {
+    // Log the address Clash will see before logging in: keys are created for exactly this IP.
+    try {
+      log.info(`egress IP (what Clash sees): ${await egressIp()}${proxyUrl() ? ' via proxy' : ''}`);
+    } catch (err) {
+      log.warn(`could not determine the egress IP${proxyUrl() ? ' (is the proxy tunnel running?)' : ''}: ${(err as Error).message.slice(0, 120)}`);
+    }
   }
   const { client, manager } = await createLoginClient(asKv(valkey), true, signal);
 
   const controller = new AvailabilityController({
     probe: () => client.getLocations({ limit: 1 }),
     relogin: () => manager.relogin('probe was rejected'),
+    probeRetries: config.availability.probeRetries,
+    probeRetryDelayMs: config.availability.probeRetryDelayMs,
     publish: async (state) => {
       await valkey.set(AVAILABILITY_KEY, JSON.stringify(state), 'EX', config.availability.stateTtlSeconds);
     },
