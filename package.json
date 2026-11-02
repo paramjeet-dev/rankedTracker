@@ -1,42 +1,25 @@
 {
-  "name": "coc-ranked-tracker",
+  "name": "coc-tracker-v2",
   "private": true,
   "type": "module",
-  "engines": {
-    "node": ">=20"
-  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
-    "seed-tiers": "tsx src/seed-tiers.ts",
-    "smoke": "tsx src/smoke.ts",
-    "probe": "tsx src/retention-probe.ts",
-    "crawl": "tsx src/crawler.ts",
-    "seed": "tsx src/seed.ts",
-    "sweep": "tsx src/sweep.ts",
-    "stats": "tsx src/stats.ts",
-    "trophies": "tsx src/trophies.ts",
-    "inspect": "tsx src/inspect-group.ts",
-    "availability": "tsx src/processes/availability.ts",
-    "test": "tsx --test test/*.test.ts",
-    "typecheck": "tsc --noEmit",
-    "migrate": "tsx src/processes/migrate.ts",
-    "discovery": "tsx src/processes/players-discovery.ts",
-    "profile": "tsx src/processes/players-profile.ts",
-    "groups": "tsx src/processes/groups.ts",
-    "battles": "tsx src/processes/battles.ts",
-    "seed-clans": "tsx src/processes/seed-clans.ts",
-    "import-queue": "tsx src/processes/import-legacy-queue.ts",
-    "egress": "tsx src/processes/egress.ts"
-  },
-  "dependencies": {
-    "clashofclans.js": "^5.1.0",
-    "dotenv": "^16.4.5",
-    "pg": "^8.12.0",
-    "ioredis": "^6.3.2"
+    "test": "node --import tsx --test packages/shared/src/*.test.ts && node --import tsx test/integration.ts",
+    "gateway": "node --env-file=.env --import tsx apps/gateway/src/index.ts",
+    "typecheck": "tsc -p tsconfig.base.json --noEmit",
+    "test:integration": "node --import tsx test/integration.ts",
+    "validate": "node --env-file=.env --import tsx scripts/validate.ts",
+    "aggregator": "node --import tsx apps/aggregator/src/index.ts",
+    "smoke": "node --env-file=.env --import tsx scripts/smoke.ts"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
-    "@types/pg": "^8.11.6",
+    "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.6.0",
+    "@electric-sql/pglite": "^0.3.0",
+    "@electric-sql/pglite-socket": "^0.0.20"
   }
 }
