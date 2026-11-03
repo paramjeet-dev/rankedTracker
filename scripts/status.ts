@@ -10,7 +10,14 @@ console.table(await sql`select value->>'available' available, value->>'maintenan
 console.log("Queue"); console.table(await sql`select kind, status, count(*)::int n from job group by 1, 2 order by 1, 2`);
 console.log("API calls, last 10 min, by HTTP status (200 should dominate; 403/429/5xx are problems)");
 console.table(await sql`select status, count(*)::int n, round(avg(ms))::int avg_ms from fetch_log where at > now() - interval '10 min' group by 1 order by 2 desc`);
-console.log("Current request rate"); console.table(await sql`select round(count(*) / 60.0, 1) as req_per_s_last_minute from fetch_log where at > now() - interval '1 min'`);
+console.log("Request rate (successful responses) and failed attempts");
+console.table(await sql`select round(count(*) filter (where status > 0 and at > now() - interval '1 min') / 60.0, 1) req_per_s_1min,
+  round(count(*) filter (where status > 0) / 600.0, 1) req_per_s_10min, count(*) filter (where status = 0)::int failed_attempts_10min from fetch_log where at > now() - interval '10 min'`);
+console.log("Latency by endpoint, last 10 min (queue = waited in gateway, ttfb = gateway -> official API; avg_ms - queue - ttfb ~ tunnel + download)");
+console.table(await sql`select endpoint, count(*)::int n, round(avg(ms))::int avg_ms, round(percentile_cont(0.95) within group (order by ms))::int p95_ms,
+  round(avg(queue_ms))::int queue_ms, round(avg(ttfb_ms))::int ttfb_ms from fetch_log where at > now() - interval '10 min' and status > 0 group by 1 order by 2 desc`);
+console.log("Failed attempts by cause, last 10 min (TIMEOUT / ECONNRESET = tunnel trouble; ECONNREFUSED = gateway or tunnel down)");
+console.table(await sql`select err, count(*)::int n from fetch_log where status = 0 and at > now() - interval '10 min' group by 1 order by 2 desc`);
 console.log("Job errors (ParseError = payload shape differs; look at data/raw to fix the parser)");
 console.table(await sql`select kind, left(last_error, 110) error, count(*)::int n from job where last_error is not null group by 1, 2 order by 3 desc limit 8`);
 console.log("Data");

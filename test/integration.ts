@@ -4,7 +4,7 @@ import fs from "node:fs";
 import assert from "node:assert/strict";
 
 const db = new PGlite();
-for (const f of ["001_init.sql", "002_workers.sql", "003_analytics.sql"]) await db.exec(fs.readFileSync(`packages/db/migrations/${f}`, "utf8"));
+for (const f of ["001_init.sql", "002_workers.sql", "003_analytics.sql", "004_diagnostics.sql"]) await db.exec(fs.readFileSync(`packages/db/migrations/${f}`, "utf8"));
 const server = new PGLiteSocketServer({ db, port: 54329, host: "127.0.0.1" });
 await server.start();
 process.env.DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:54329/postgres";
@@ -28,7 +28,11 @@ assert.equal(g.battles.length, 3);
 await core.saveGroup(g, SEASON, "#GRP1", "#AAA");
 // same battle seen from the other side (Bob's log): attacker #AAA hit #BBB, from the defense log
 const bobView = core.parseGroup({ ...payload, attackLog: [], defenseLog: [{ opponentPlayerTag: "#AAA", stars: 3, destructionPercentage: 100, trophies: 0, creationTime: "2026-10-12T06:00:00Z" }] }, "#BBB");
-await core.saveGroup(bobView, SEASON, "#GRP1", "#BBB");
+await sql`update group_member set trophies = 999 where player_tag = '#CCC' and group_tag = '#GRP1'`; // sentinel: a roster:false save must not overwrite it
+await core.saveGroup(bobView, SEASON, "#GRP1", "#BBB", { roster: false });
+const [sent] = await sql`select trophies from group_member where player_tag = '#CCC'`; assert.equal(sent.trophies, 999, "memberlog mode leaves roster rows alone");
+const [bobRow] = await sql`select log_final from group_member where player_tag = '#BBB'`; assert.equal(bobRow.log_final, true);
+await sql`update group_member set trophies = 100 where player_tag = '#CCC' and group_tag = '#GRP1'`;
 
 const battles = await sql`select attacker_tag, defender_tag, attacker_gain, defender_gain, atk_log_reported, def_log_reported from battle order by battle_time`;
 console.table(battles);

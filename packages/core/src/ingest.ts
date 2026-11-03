@@ -45,8 +45,10 @@ export async function saveHistory(tag: string, rows: HistoryRow[]) {
 }
 
 /** Store a group response: roster (layer B), battles (layer C) from the probe's logs, new players -> follow-up jobs. */
-export async function saveGroup(g: Group, seasonId: number, groupTag: string, probeTag: string) {
+export async function saveGroup(g: Group, seasonId: number, groupTag: string, probeTag: string, opts: { roster?: boolean } = {}) {
+  const roster = opts.roster ?? true; // memberlog passes false: roster rows already exist, don't rewrite 100 rows per member log
   await ensureSeason(seasonId);
+  if (roster) {
   const fresh = await sql<{ tag: string; inserted: boolean }[]>`
     insert into player (tag, name) select t.tag, t.name from jsonb_to_recordset(${sql.json(g.members.map((m) => ({ tag: m.playerTag, name: m.playerName })) as any)}::jsonb) as t(tag text, name text)
     on conflict (tag) do update set name = excluded.name returning tag, (xmax = 0) as inserted`;
@@ -62,6 +64,8 @@ export async function saveGroup(g: Group, seasonId: number, groupTag: string, pr
       trophies = excluded.trophies, attack_wins = excluded.attack_wins, attack_losses = excluded.attack_losses, defense_wins = excluded.defense_wins,
       defense_losses = excluded.defense_losses, roster_fetched_at = now()`;
 
+  }
+
   if (g.battles.length) await sql`
     insert into battle (season_id, group_tag, attacker_tag, defender_tag, battle_time, stars, destruction, attacker_gain, defender_gain, atk_log_reported, def_log_reported)
     select ${seasonId}::bigint, ${groupTag}, t.a, t.d, t.ts, t.stars, t.dest, t.ag, t.dg, t.ar, t.dr
@@ -73,6 +77,7 @@ export async function saveGroup(g: Group, seasonId: number, groupTag: string, pr
 
   const final = seasonEnded(seasonId);
   await sql`update group_member set log_fetched_at = now(), log_final = ${final} where season_id = ${seasonId} and group_tag = ${groupTag} and player_tag = ${probeTag}`;
+  if (!roster) return; // coverage_by_season counts final logs from group_member, no per-call group row update (avoids lock contention)
   await sql`update league_group set members_total = ${g.members.length}, roster_fetched_at = now(),
             logs_fetched = (select count(*) from group_member where season_id = ${seasonId} and group_tag = ${groupTag} and log_fetched_at is not null)
             where season_id = ${seasonId} and group_tag = ${groupTag}`;

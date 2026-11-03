@@ -55,6 +55,7 @@ function fail(job: Job, status: number, msg: string, retryAfter?: number) {
 }
 
 function dispatch(job: Job, k: KeyState) {
+  const queuedMs = Date.now() - job.enqueuedAt, t0 = Date.now();
   const up = https.request(
     { host: UPSTREAM, path: job.path, method: "GET", timeout: 15000,
       headers: { authorization: `Bearer ${k.key}`, accept: "application/json", "accept-encoding": String(job.req.headers["accept-encoding"] ?? "gzip") } },
@@ -63,7 +64,7 @@ function dispatch(job: Job, k: KeyState) {
       if (status === 429) { k.throttled++; stats.upstream429++; k.cooldownUntil = Date.now() + 2000; }
       else if (status === 403 && !job.path.includes("/leaguegroup")) { k.errors++; } // 403 may be a bad key/IP; see /_stats
       else if (status < 500) k.ok++;
-      const h: http.OutgoingHttpHeaders = { "x-key-id": String(k.id) };
+      const h: http.OutgoingHttpHeaders = { "x-key-id": String(k.id), "x-queue-ms": String(queuedMs), "x-ttfb-ms": String(Date.now() - t0) };
       for (const n of ["content-type", "content-encoding", "cache-control", "retry-after"]) if (r.headers[n]) h[n] = r.headers[n];
       job.res.writeHead(status, h);
       r.pipe(job.res);
