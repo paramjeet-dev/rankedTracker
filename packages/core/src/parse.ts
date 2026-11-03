@@ -13,7 +13,8 @@ export interface GroupRef { groupTag: string; seasonId: number }
 export interface Profile { tag: string; name: string; clanTag: string | null; trophies: number | null; tierId: number | null; townHall: number | null; current: GroupRef | null; previous: GroupRef | null }
 
 function ref(g: unknown, s: unknown): GroupRef | null {
-  const groupTag = typeof g === "string" && g ? g : null; const seasonId = num(s);
+  // "#0" means "not in a group"
+  const groupTag = typeof g === "string" && g && g !== "#0" && g !== "0" ? g : null; const seasonId = num(s);
   return groupTag && seasonId ? { groupTag, seasonId } : null;
 }
 
@@ -38,20 +39,33 @@ export interface Group { members: Member[]; battles: Battle[] }
 
 const firstArray = (o: any, ...names: string[]) => { for (const n of names) if (Array.isArray(o?.[n])) return o[n] as any[]; return null; };
 
+const fin = (v: unknown, what: string): number => {
+  const n = Number(v);
+  if (v === undefined || v === null || v === "" || !Number.isFinite(n)) throw new ParseError(`group: missing/invalid ${what} (got ${JSON.stringify(v)})`);
+  return n;
+};
+
 export function parseGroup(j: any, probeTag: string): Group {
   const root = j?.leagueGroup ?? j;
   const rawMembers = firstArray(root, "members");
-  const atk = firstArray(root, "attackLog", "attacks", "attackLogs");
-  const def = firstArray(root, "defenseLog", "defenceLog", "defenses", "defenceLogs", "defenseLogs");
+  const atk = firstArray(root, "attackLogs", "attackLog", "attacks");
+  const def = firstArray(root, "defenseLogs", "defenseLog", "defenceLogs", "defenceLog", "defenses");
   if (!rawMembers || !atk || !def) throw new ParseError(`group: unexpected shape; top-level keys=${Object.keys(root ?? {})}`);
   const probe = normalizeTag(probeTag);
-  const members: Member[] = rawMembers.map((m: any) => ({ playerTag: normalizeTag(m.playerTag), playerName: m.playerName, clanTag: tag(m.clanTag), clanName: m.clanName ?? null,
-    trophies: Number(m.leagueTrophies), atkWin: Number(m.attackWinCount), atkLoss: Number(m.attackLoseCount), defWin: Number(m.defenseWinCount), defLoss: Number(m.defenseLoseCount) }));
+  const members: Member[] = rawMembers.map((m: any) => {
+    if (typeof m.playerTag !== "string") throw new ParseError(`group: member without playerTag; keys=${Object.keys(m ?? {})}`);
+    return { playerTag: normalizeTag(m.playerTag), playerName: m.playerName ?? null, clanTag: tag(m.clanTag), clanName: m.clanName ?? null,
+      trophies: fin(m.leagueTrophies, "leagueTrophies"), atkWin: fin(m.attackWinCount, "attackWinCount"), atkLoss: fin(m.attackLoseCount, "attackLoseCount"),
+      defWin: fin(m.defenseWinCount, "defenseWinCount"), defLoss: fin(m.defenseLoseCount, "defenseLoseCount") };
+  });
   const byKey = new Map<string, Battle>();
   const add = (attacker: string, defender: string, e: any, side: "atk" | "def") => {
-    const stars = Number(e.stars), destruction = Number(e.destructionPercentage), time = new Date(e.creationTime).toISOString();
+    if (typeof e.opponentPlayerTag !== "string") throw new ParseError(`group: log entry without opponentPlayerTag; keys=${Object.keys(e ?? {})}`);
+    const stars = fin(e.stars, "stars"), destruction = fin(e.destructionPercentage, "destructionPercentage");
+    const d = new Date(e.creationTime); if (Number.isNaN(d.getTime())) throw new ParseError(`group: bad creationTime ${JSON.stringify(e.creationTime)}`);
+    const time = d.toISOString();
     const key = `${attacker}|${defender}|${time}`;
-    const rep = e.trophies === undefined ? null : Number(e.trophies);
+    const rep = e.trophies === undefined || e.trophies === null ? null : Number(e.trophies);
     const b = byKey.get(key) ?? { attacker, defender, time, stars, destruction, attackerGain: attackerTrophies(stars, destruction), defenderGain: defenderTrophies(stars, destruction), atkRep: null, defRep: null };
     if (side === "atk") b.atkRep = rep; else b.defRep = rep;
     byKey.set(key, b);

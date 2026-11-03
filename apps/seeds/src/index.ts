@@ -1,6 +1,6 @@
 /** Seeds: location leaderboards -> players -> profile jobs. NOTE: verify these leaderboards actually contain ranked-mode participants. */
-import { runWorker, cocGet, locationsPath, rankingsPath, enqueueMany, sql, envNum } from "@coc/core";
-import { normalizeTag } from "@coc/shared";
+import { runWorker, cocGet, locationsPath, rankingsPath, enqueueMany, sql, envNum, log } from "@coc/core";
+import { normalizeTag, inScope } from "@coc/shared";
 process.env.PROC_NAME ??= "seeds";
 
 await runWorker({ name: "seeds", kinds: ["seed_locations", "seed"], concurrency: 2, rps: envNum("RPS_SEEDS", 5), handlers: {
@@ -13,9 +13,12 @@ await runWorker({ name: "seeds", kinds: ["seed_locations", "seed"], concurrency:
     const { locationId } = job.payload; let after: string | undefined;
     for (let page = 0; page < 5; page++) { // top ~1000 per location
       const j = await cocGet(rankingsPath(locationId, after), { kind: "rankings", key: `${locationId}:${page}` });
-      const tags: string[] = (j.items ?? []).map((i: any) => normalizeTag(i.tag));
+      const all: any[] = j.items ?? [];
+      const items = all.filter((i) => i.leagueTier?.id == null || inScope(Number(i.leagueTier.id))); // leaderboard tops are mostly out-of-scope tiers
+      log("seeds", `${locationId} page ${page}: ${items.length}/${all.length} in scope`);
+      const tags: string[] = items.map((i: any) => normalizeTag(i.tag));
       if (tags.length) {
-        const names = new Map<string, string>((j.items ?? []).map((i: any) => [normalizeTag(i.tag), i.name]));
+        const names = new Map<string, string>(items.map((i: any) => [normalizeTag(i.tag), i.name]));
         const rows = await sql<{ tag: string; inserted: boolean }[]>`
           insert into player (tag, name) select t.tag, t.name from jsonb_to_recordset(${sql.json(tags.map((t) => ({ tag: t, name: names.get(t) })) as any)}::jsonb) as t(tag text, name text)
           on conflict (tag) do update set name = excluded.name returning tag, (xmax = 0) as inserted`;

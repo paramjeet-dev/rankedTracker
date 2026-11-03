@@ -8,7 +8,8 @@ await runWorker({ name: "profile", kinds: ["profile"], concurrency: envNum("CONC
     const tag: string = job.payload.tag;
     const p = parseProfile(await cocGet(playerPath(tag), { kind: "player", key: tag }));
     await saveProfile(p);
-    // current group: tier known from the profile. previous group: tier unknown here (backfilled by the scheduler).
-    if (p.current && (p.tierId === null || inScope(p.tierId))) await discoverGroup(p.current.seasonId, p.current.groupTag, p.tag, p.tierId, seasonEnded(p.current.seasonId) ? 1 : 6);
+    // Only players currently in an in-scope tier expand the crawl (roster graph: members -> their current/previous groups -> their rosters ...).
+    if (p.tierId === null || !inScope(p.tierId)) return;
+    if (p.current) await discoverGroup(p.current.seasonId, p.current.groupTag, p.tag, p.tierId, seasonEnded(p.current.seasonId) ? 1 : 6);
     if (p.previous) await discoverGroup(p.previous.seasonId, p.previous.groupTag, p.tag, null, seasonEnded(p.previous.seasonId) ? 1 : 6);
   } } });

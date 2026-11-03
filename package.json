@@ -13,7 +13,17 @@
     "test:integration": "node --import tsx test/integration.ts",
     "validate": "node --env-file=.env --import tsx scripts/validate.ts",
     "aggregator": "node --import tsx apps/aggregator/src/index.ts",
-    "smoke": "node --env-file=.env --import tsx scripts/smoke.ts"
+    "smoke": "node --env-file=.env --import tsx scripts/smoke.ts",
+    "add-seed": "node --env-file=.env --import tsx scripts/add-seed.ts",
+    "status": "node --env-file=.env --import tsx scripts/status.ts",
+    "start:availability": "node --env-file=.env --import tsx apps/availability/src/index.ts",
+    "start:scheduler": "node --env-file=.env --import tsx apps/scheduler/src/index.ts",
+    "start:seeds": "node --env-file=.env --import tsx apps/seeds/src/index.ts",
+    "start:profile": "node --env-file=.env --import tsx apps/profile/src/index.ts",
+    "start:history": "node --env-file=.env --import tsx apps/history/src/index.ts",
+    "start:roster": "node --env-file=.env --import tsx apps/roster/src/index.ts",
+    "start:memberlog": "node --env-file=.env --import tsx apps/memberlog/src/index.ts",
+    "start:aggregator": "node --env-file=.env --import tsx apps/aggregator/src/index.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
