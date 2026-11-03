@@ -23,7 +23,8 @@ const interval = 1000 / RPS;
 interface Job { req: http.IncomingMessage; res: http.ServerResponse; path: string; enqueuedAt: number }
 const queue: Job[] = [];
 let timer: NodeJS.Timeout | null = null;
-const stats = { received: 0, rejectedFull: 0, upstream429: 0, started: Date.now() };
+const stats = { received: 0, rejectedFull: 0, upstream429: 0, aborted: 0, started: Date.now() };
+const recent: number[] = []; // total ms per finished response (receive -> last byte handed to the socket)
 
 const authed = (req: http.IncomingMessage) => {
   const given = Buffer.from(String(req.headers["x-gateway-secret"] ?? ""));
@@ -75,18 +76,24 @@ function dispatch(job: Job, k: KeyState) {
   up.end();
 }
 
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   if (!authed(req)) { res.writeHead(401).end(); return; }
   if (req.url === "/_stats") {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ queue: queue.length, ...stats, keys: keys.map(({ key, ...s }) => s) }));
+    const sorted = [...recent].sort((a, b) => a - b);
+    res.end(JSON.stringify({ queue: queue.length, ...stats, totalMs: { n: sorted.length, avg: sorted.length ? Math.round(sorted.reduce((a, b) => a + b, 0) / sorted.length) : 0, p95: sorted[Math.floor(sorted.length * 0.95)] ?? 0 }, keys: keys.map(({ key, ...s }) => s) }));
     return;
   }
   if (req.method !== "GET" || !req.url || !/^\/v1\/[A-Za-z0-9%/_.\-?=&]*$/.test(req.url) || req.url.includes("..")) {
     res.writeHead(400).end(); return;
   }
   stats.received++;
+  const tRecv = Date.now();
+  res.on("finish", () => { recent.push(Date.now() - tRecv); if (recent.length > 2000) recent.shift(); });
+  res.on("close", () => { if (!res.writableFinished) stats.aborted++; });
   if (queue.length >= MAX_QUEUE) { stats.rejectedFull++; fail({ req, res, path: req.url, enqueuedAt: Date.now() }, 503, "queue full", 2); return; }
   queue.push({ req, res, path: req.url, enqueuedAt: Date.now() });
   pump();
-}).listen(PORT, HOST, () => console.log(`gateway on ${HOST}:${PORT} with ${keys.length} keys @ ${RPS} rps/key`));
+});
+server.keepAliveTimeout = 120_000; server.headersTimeout = 125_000; // default 5s makes clients reuse sockets the server already closed
+server.listen(PORT, HOST, () => console.log(`gateway on ${HOST}:${PORT} with ${keys.length} keys @ ${RPS} rps/key`));

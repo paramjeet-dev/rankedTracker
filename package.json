@@ -23,7 +23,8 @@
     "start:history": "node --env-file=.env --import tsx apps/history/src/index.ts",
     "start:roster": "node --env-file=.env --import tsx apps/roster/src/index.ts",
     "start:memberlog": "node --env-file=.env --import tsx apps/memberlog/src/index.ts",
-    "start:aggregator": "node --env-file=.env --import tsx apps/aggregator/src/index.ts"
+    "start:aggregator": "node --env-file=.env --import tsx apps/aggregator/src/index.ts",
+    "cleanup": "node --env-file=.env --import tsx scripts/cleanup.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

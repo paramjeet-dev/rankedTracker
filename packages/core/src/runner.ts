@@ -1,6 +1,6 @@
 import { sleep, log } from "./config.js";
 import { claim, complete, retryLater, type Job } from "./queue.js";
-import { NotFound, RetryLater, setRps } from "./client.js";
+import { NotFound, RetryLater, setRps, limiterState } from "./client.js";
 import { isOpen, startGateWatcher } from "./gate.js";
 import { ParseError } from "./parse.js";
 
@@ -11,7 +11,7 @@ export async function runWorker(o: WorkerOpts) {
   setRps(o.rps); startGateWatcher();
   let inflight = 0, stop = false, done = 0, failed = 0;
   for (const s of ["SIGINT", "SIGTERM"] as const) process.on(s, () => { stop = true; });
-  setInterval(() => log(o.name, `inflight=${inflight} done=${done} failed=${failed}`), 30_000).unref();
+  setInterval(() => log(o.name, `claimed=${inflight} done=${done} failed=${failed} http-limit=${limiterState().limit} http-inflight=${limiterState().inflight}`), 30_000).unref();
   log(o.name, `started kinds=${o.kinds} concurrency=${o.concurrency} rps=${o.rps}`);
 
   const run = async (job: Job) => {

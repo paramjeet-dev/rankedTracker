@@ -1,4 +1,4 @@
-import { SEASON_LEN, currentSeasonId } from "@coc/shared";
+import { SEASON_LEN, currentSeasonId, inScope } from "@coc/shared";
 import { sql } from "./db.js";
 import { enqueueMany, type NewJob } from "./queue.js";
 import { cfg } from "./config.js";
@@ -24,6 +24,7 @@ export async function saveProfile(p: Profile) {
 
 /** Register a group (idempotent) and queue its roster job if the roster was never fetched. */
 export async function discoverGroup(seasonId: number, groupTag: string, probeTag: string, tierId: number | null, priority: number) {
+  if (tierId === null || !inScope(tierId)) return; // never register groups outside the tracked tiers
   await ensureSeason(seasonId);
   await sql`insert into league_group (season_id, group_tag, tier_id, probe_player_tag) values (${seasonId}, ${groupTag}, ${tierId}, ${probeTag})
             on conflict (season_id, group_tag) do update set tier_id = coalesce(league_group.tier_id, excluded.tier_id)`;

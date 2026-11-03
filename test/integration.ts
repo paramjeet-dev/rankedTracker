@@ -69,6 +69,16 @@ const st = await sql`select attacks, avg_stars, three_star_rate, near_miss_rate,
 console.table(st); assert.equal(st[0].attacks, 2); assert.equal(st[0].three_star_rate, 0.5); assert.equal(st[0].log_complete, true);
 const gs = await sql`select n, avg_trophies, top10_share, basis from group_stats`; console.table(gs); assert.equal(gs[0].n, 3);
 const rec = await sql`select * from trophy_reconciliation`; console.table(rec);
+// cleanup: out-of-scope group (tier 25) with queued jobs and members
+await sql`insert into league_group (season_id, group_tag, tier_id, probe_player_tag) values (${SEASON}, '#OOS', 105000025, '#ZZZ')`;
+await sql`insert into group_member (season_id, group_tag, player_tag, trophies) values (${SEASON}, '#OOS', '#ZZZ', 1)`;
+await core.enqueueMany([{ kind: "roster", dedupeKey: "oos", payload: { seasonId: SEASON, groupTag: "#OOS", probeTag: "#ZZZ" } }, { kind: "history", dedupeKey: "#ZZZ", payload: { tag: "#ZZZ" } }, { kind: "history", dedupeKey: "#AAA2", payload: { tag: "#AAA" } }]);
+const dry: any = await core.cleanupOutOfScope({ apply: false, purgeData: false });
+assert.equal(dry.outOfScopeGroups, 1); assert.equal(dry.queuedGroupJobsToDelete[0].n, 1); assert.equal(dry.queuedPlayerJobsToDelete[0].n, 1, "only #ZZZ's job, not in-scope #AAA's");
+await core.cleanupOutOfScope({ apply: true, purgeData: true });
+assert.equal((await sql`select count(*)::int n from league_group where tier_id = 105000025`)[0].n, 0);
+assert.equal((await sql`select count(*)::int n from job where dedupe_key in ('oos', '#ZZZ')`)[0].n, 0);
+assert.equal((await sql`select count(*)::int n from job where dedupe_key = '#AAA2'`)[0].n, 1, "in-scope work survives");
 const cov = await sql`select * from coverage_by_season`; console.table(cov);
 const res = await sql`select * from player_season_result limit 1`; // view compiles
 console.log("OK: schema, ingest, dedupe, queue, coverage view all work");

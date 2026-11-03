@@ -24,6 +24,11 @@ console.log("Data");
 console.table(await sql`select (select count(*) from player)::int players, (select count(*) from player_season)::int season_rows,
   (select count(*) from league_group)::int groups, (select count(*) from league_group where roster_fetched_at is not null)::int rostered,
   (select count(*) from group_member)::int members, (select count(*) from group_member where log_final)::int final_logs, (select count(*) from battle)::int battles`);
+console.log("Groups by tier (null = unresolved; only 105000026..105000033 are tracked)");
+console.table(await sql`select coalesce(tier_id::text, 'unknown') tier, count(*)::int groups from league_group group by 1 order by 1`);
+console.log("Largest tables");
+console.table(await sql`select c.relname, pg_size_pretty(pg_total_relation_size(c.oid)) size, c.reltuples::bigint approx_rows from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'r' order by pg_total_relation_size(c.oid) desc limit 6`);
 console.log("Coverage by season"); console.table(await sql`select * from coverage_by_season order by season_id desc limit 3`);
 const [db] = await sql`select pg_size_pretty(pg_database_size(current_database())) size`;
 console.log(`Postgres size: ${db.size}   raw files: ${(dirSize(cfg.rawDir) / 1e6).toFixed(1)} MB`);

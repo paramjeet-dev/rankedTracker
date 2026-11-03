@@ -2,7 +2,7 @@
 import http from "node:http";
 import https from "node:https";
 import zlib from "node:zlib";
-import { cfg, sleep } from "./config.js";
+import { cfg, sleep, envNum } from "./config.js";
 import { sql } from "./db.js";
 import { closeLocal, waitOpen } from "./gate.js";
 import { saveRaw } from "./raw.js";
@@ -14,7 +14,11 @@ export interface RawResult { status: number; body: Buffer; encoding?: string; re
 
 const agents = { "http:": new http.Agent({ keepAlive: true, maxSockets: 512 }), "https:": new https.Agent({ keepAlive: true, maxSockets: 512 }) };
 
-export function rawRequest(path: string, timeoutMs = 20_000): Promise<RawResult> {
+export async function rawRequest(path: string, timeoutMs = 20_000): Promise<RawResult> {
+  try { return await rawRequestOnce(path, timeoutMs); }
+  catch (e: any) { if (e?.code === "ECONNRESET" && e?.reused) return rawRequestOnce(path, timeoutMs); throw e; } // stale keep-alive socket: one transparent retry
+}
+function rawRequestOnce(path: string, timeoutMs: number): Promise<RawResult> {
   const url = new URL(path, cfg.gatewayUrl);
   const mod = url.protocol === "https:" ? https : http;
   return new Promise((resolve, reject) => {
@@ -28,11 +32,30 @@ export function rawRequest(path: string, timeoutMs = 20_000): Promise<RawResult>
       res.on("error", reject);
     });
     req.on("timeout", () => req.destroy(Object.assign(new Error("timeout"), { code: "TIMEOUT" })));
-    req.on("error", reject);
+    req.on("error", (err: any) => { err.reused = req.reusedSocket; reject(err); });
     req.end();
   });
 }
 const decode = (r: RawResult) => (r.encoding === "gzip" ? zlib.gunzipSync(r.body) : r.body).toString("utf8");
+
+/**
+ * Adaptive in-flight limit (AIMD): grows by 1 per 10 healthy responses, x0.7 on any error or slow (>5s) response.
+ * Finds the real capacity of whatever sits between us and the gateway (SSH tunnel, home link) instead of guessing.
+ */
+class Limiter {
+  inflight = 0; private okStreak = 0; private waiters: (() => void)[] = [];
+  constructor(public limit: number, private min: number, private max: number) {}
+  async acquire() { if (this.inflight < Math.floor(this.limit)) { this.inflight++; return; } await new Promise<void>((r) => this.waiters.push(r)); }
+  release(good: boolean) {
+    this.inflight--;
+    if (good) { if (++this.okStreak >= 10) { this.limit = Math.min(this.max, this.limit + 1); this.okStreak = 0; } }
+    else { this.limit = Math.max(this.min, this.limit * 0.7); this.okStreak = 0; }
+    while (this.waiters.length && this.inflight < Math.floor(this.limit)) { this.inflight++; this.waiters.shift()!(); }
+  }
+}
+const MAX_INFLIGHT = envNum("CLIENT_MAX_INFLIGHT", 48);
+const limiter = new Limiter(Math.min(12, MAX_INFLIGHT), 4, MAX_INFLIGHT);
+export const limiterState = () => ({ limit: Math.floor(limiter.limit), inflight: limiter.inflight });
 
 // per-process pacing (each worker process has its own requests_per_second)
 let interval = 0, nextSlot = 0;
@@ -63,8 +86,10 @@ export async function cocGet(path: string, meta: { kind: string; key: string; se
   await pace();
   const t0 = Date.now();
   let r: RawResult;
-  try { r = await rawRequest(path); consecFail = 0; }
+  await limiter.acquire();
+  try { r = await rawRequest(path); consecFail = 0; limiter.release(Date.now() - t0 < 5000); }
   catch (e: any) {
+    limiter.release(false);
     const code: string = e?.code ?? "ERR";
     logBuf.push({ endpoint: endpointOf(path), status: 0, ms: Date.now() - t0, bytes: 0, key_id: null, season_id: meta.seasonId ?? null, queue_ms: null, ttfb_ms: null, err: code });
     consecFail++;
@@ -89,7 +114,7 @@ export async function cocGet(path: string, meta: { kind: string; key: string; se
 /** Single un-gated probe for the availability controller. */
 export async function probe(): Promise<"ok" | "maintenance" | "proxy_down"> {
   try {
-    const r = await rawRequest("/v1/locations?limit=1", 10_000);
+    const r = await rawRequest("/v1/locations?limit=1", 15_000);
     if (r.status === 200) return "ok";
     let j: any = null; try { j = JSON.parse(decode(r)); } catch {}
     if (j?.reason === "inMaintenance" || /maintenance/i.test(String(j?.message ?? ""))) return "maintenance";
