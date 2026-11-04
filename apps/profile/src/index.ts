@@ -3,7 +3,7 @@ import { runWorker, cocGet, playerPath, parseProfile, saveProfile, discoverGroup
 import { inScope } from "@coc/shared";
 process.env.PROC_NAME ??= "profile";
 
-await runWorker({ name: "profile", kinds: ["profile"], concurrency: envNum("CONC_PROFILE", 45), rps: envNum("RPS_PROFILE", 15), handlers: {
+await runWorker({ name: "profile", kinds: ["profile"], concurrency: envNum("CONC_PROFILE", 100), rps: envNum("RPS_PROFILE", 10), prefetch: (j) => [{ path: playerPath(j.payload.tag), kind: "player", key: j.payload.tag }], handlers: {
   async profile(job) {
     const tag: string = job.payload.tag;
     const p = parseProfile(await cocGet(playerPath(tag), { kind: "player", key: tag }));

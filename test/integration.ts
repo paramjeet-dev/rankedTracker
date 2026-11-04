@@ -41,6 +41,15 @@ assert.equal(battles[0].atk_log_reported, 40); assert.equal(battles[0].def_log_r
 assert.equal(battles[1].attacker_gain, 23); assert.equal(battles[1].defender_gain, 17);
 assert.equal(battles[2].defender_gain, 40); // CCC attacked Alice with 0 stars -> defender (Alice) gets 40
 
+// profile sampling: with PROFILES_PER_GROUP=2 a roster of 5 brand-new players yields 5 history jobs but only 2 profile jobs
+process.env.PROFILES_PER_GROUP = "2";
+const five = core.parseGroup({ members: ["#N1","#N2","#N3","#N4","#N5"].map((t) => ({ playerTag: t, playerName: t, leagueTrophies: 1, attackWinCount: 0, attackLoseCount: 0, defenseWinCount: 0, defenseLoseCount: 0 })), attackLogs: [], defenseLogs: [] }, "#N1");
+await core.saveGroup(five, SEASON, "#GRPN", "#N1");
+const nj = await sql`select kind, count(*)::int n from job where dedupe_key in ('#N1','#N2','#N3','#N4','#N5') group by 1 order by 1`;
+assert.deepEqual(nj.map((r) => [r.kind, r.n]), [["history", 5], ["profile", 2]]);
+delete process.env.PROFILES_PER_GROUP;
+await sql`delete from job where dedupe_key in ('#N1','#N2','#N3','#N4','#N5')`;
+
 // queue: dedupe, claim, retry, complete
 await core.enqueue({ kind: "profile", dedupeKey: "#X", payload: { tag: "#X" } });
 await core.enqueue({ kind: "profile", dedupeKey: "#X", payload: { tag: "#X" } });

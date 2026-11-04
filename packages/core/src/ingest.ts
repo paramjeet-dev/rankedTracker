@@ -1,7 +1,7 @@
 import { SEASON_LEN, currentSeasonId, inScope } from "@coc/shared";
 import { sql } from "./db.js";
 import { enqueueMany, type NewJob } from "./queue.js";
-import { cfg } from "./config.js";
+import { cfg, envNum } from "./config.js";
 import type { Group, HistoryRow, Profile } from "./parse.js";
 
 const seen = new Set<number>();
@@ -53,9 +53,11 @@ export async function saveGroup(g: Group, seasonId: number, groupTag: string, pr
   const fresh = await sql<{ tag: string; inserted: boolean }[]>`
     insert into player (tag, name) select t.tag, t.name from jsonb_to_recordset(${sql.json(g.members.map((m) => ({ tag: m.playerTag, name: m.playerName })) as any)}::jsonb) as t(tag text, name text)
     on conflict (tag) do update set name = excluded.name returning tag, (xmax = 0) as inserted`;
-  await enqueueMany(fresh.filter((f) => f.inserted).flatMap<NewJob>((f) => [
+  const added = fresh.filter((f) => f.inserted);
+  const perGroup = envNum("PROFILES_PER_GROUP", 8); // history for everyone (layer A); profiles only for a sample: they just reveal 2 group refs each
+  await enqueueMany(added.flatMap<NewJob>((f, i) => [
     { kind: "history", dedupeKey: f.tag, payload: { tag: f.tag }, priority: 7 },
-    { kind: "profile", dedupeKey: f.tag, payload: { tag: f.tag }, priority: 8 }]));
+    ...(i < perGroup ? [{ kind: "profile", dedupeKey: f.tag, payload: { tag: f.tag }, priority: 8 }] : [])]));
 
   await sql`insert into group_member (season_id, group_tag, player_tag, player_name, clan_tag, clan_name, trophies, attack_wins, attack_losses, defense_wins, defense_losses)
     select ${seasonId}, ${groupTag}, t.tag, t.name, t.clan_tag, t.clan_name, t.trophies, t.aw, t.al, t.dw, t.dl

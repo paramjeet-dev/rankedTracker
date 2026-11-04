@@ -15,7 +15,9 @@ console.table(await sql`select round(count(*) filter (where status > 0 and at > 
   round(count(*) filter (where status > 0) / 600.0, 1) req_per_s_10min, count(*) filter (where status = 0)::int failed_attempts_10min from fetch_log where at > now() - interval '10 min'`);
 console.log("Latency by endpoint, last 10 min (queue = waited in gateway, ttfb = gateway -> official API; avg_ms - queue - ttfb ~ tunnel + download)");
 console.table(await sql`select endpoint, count(*)::int n, round(avg(ms))::int avg_ms, round(percentile_cont(0.95) within group (order by ms))::int p95_ms,
-  round(avg(queue_ms))::int queue_ms, round(avg(ttfb_ms))::int ttfb_ms from fetch_log where at > now() - interval '10 min' and status > 0 group by 1 order by 2 desc`);
+  round(avg(queue_ms))::int queue_ms, round(avg(ttfb_ms))::int ttfb_ms, round(avg(bytes))::int avg_bytes from fetch_log where at > now() - interval '10 min' and status > 0 group by 1 order by 2 desc`);
+console.log("Group endpoint results by season, last 24h (404/500 on old seasons = how far back the API still serves data)");
+console.table(await sql`select season_id, status, count(*)::int n from fetch_log where endpoint like '%leaguegroup%' and at > now() - interval '24 hours' group by 1, 2 order by 1 desc, 2`);
 console.log("Failed attempts by cause, last 10 min (TIMEOUT / ECONNRESET = tunnel trouble; ECONNREFUSED = gateway or tunnel down)");
 console.table(await sql`select err, count(*)::int n from fetch_log where status = 0 and at > now() - interval '10 min' group by 1 order by 2 desc`);
 console.log("Job errors (ParseError = payload shape differs; look at data/raw to fix the parser)");

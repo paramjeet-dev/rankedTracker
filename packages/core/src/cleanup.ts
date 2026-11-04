@@ -30,3 +30,12 @@ export async function cleanupOutOfScope(opts: { apply: boolean; purgeData: boole
   }
   return { ...report, applied: true, purgedData: opts.purgeData };
 }
+
+/** Keep at most `perGroup` queued roster-discovered profile jobs (priority >= 8) per group; seeds and manual adds (priority < 8) are never touched. */
+export async function trimProfileQueue(perGroup: number, apply: boolean) {
+  const keep = sql`select id from (select j.id, row_number() over (partition by gm.season_id, gm.group_tag order by md5(j.id::text)) rn
+      from job j join group_member gm on gm.player_tag = j.payload->>'tag' where j.kind = 'profile' and j.status = 'queued' and j.priority >= 8) x where rn <= ${perGroup}`;
+  const [{ n }] = await sql<{ n: number }[]>`select count(*)::int n from job where kind = 'profile' and status = 'queued' and priority >= 8 and id not in (${keep})`;
+  if (apply) await sql`delete from job where kind = 'profile' and status = 'queued' and priority >= 8 and id not in (${keep})`;
+  return { profileJobsToDelete: n, applied: apply };
+}

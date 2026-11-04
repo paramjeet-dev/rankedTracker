@@ -1,10 +1,12 @@
 import { sleep, log } from "./config.js";
 import { claim, complete, retryLater, type Job } from "./queue.js";
-import { NotFound, RetryLater, setRps, limiterState } from "./client.js";
+import { NotFound, RetryLater, setRps, limiterState, cocPrefetch, type PrefetchReq } from "./client.js";
 import { isOpen, startGateWatcher } from "./gate.js";
 import { ParseError } from "./parse.js";
 
-export interface WorkerOpts { name: string; kinds: string[]; concurrency: number; rps: number; maxAttempts?: number; handlers: Record<string, (job: Job) => Promise<void>> }
+export interface WorkerOpts { name: string; kinds: string[]; concurrency: number; rps: number; maxAttempts?: number; handlers: Record<string, (job: Job) => Promise<void>>;
+  /** Calls this job will make, so a whole claimed batch is fetched in one gateway round trip (optional). */
+  prefetch?: (job: Job) => PrefetchReq[] }
 
 export async function runWorker(o: WorkerOpts) {
   const max = o.maxAttempts ?? 5;
@@ -30,7 +32,11 @@ export async function runWorker(o: WorkerOpts) {
     if (free <= 0) { await sleep(50); continue; }
     const jobs = await claim(o.kinds, free);
     if (jobs.length === 0) { await sleep(1000); continue; }
-    for (const j of jobs) { inflight++; void run(j); }
+    inflight += jobs.length;
+    void (async () => {
+      if (o.prefetch) { try { await cocPrefetch(jobs.flatMap((j) => o.prefetch!(j))); } catch { /* handlers fall back to single requests */ } }
+      await Promise.all(jobs.map(run));
+    })();
   }
   while (inflight > 0) await sleep(100);
 }

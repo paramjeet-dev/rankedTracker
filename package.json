@@ -7,7 +7,7 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "node --import tsx --test packages/shared/src/*.test.ts && node --import tsx test/integration.ts",
+    "test": "node --import tsx --test packages/shared/src/*.test.ts && node --import tsx test/integration.ts && node --import tsx test/batch.ts",
     "gateway": "node --env-file=.env --import tsx apps/gateway/src/index.ts",
     "typecheck": "tsc -p tsconfig.base.json --noEmit",
     "test:integration": "node --import tsx test/integration.ts",
@@ -24,7 +24,9 @@
     "start:roster": "node --env-file=.env --import tsx apps/roster/src/index.ts",
     "start:memberlog": "node --env-file=.env --import tsx apps/memberlog/src/index.ts",
     "start:aggregator": "node --env-file=.env --import tsx apps/aggregator/src/index.ts",
-    "cleanup": "node --env-file=.env --import tsx scripts/cleanup.ts"
+    "cleanup": "node --env-file=.env --import tsx scripts/cleanup.ts",
+    "bench": "node --env-file=.env --import tsx scripts/bench.ts",
+    "bench:export": "node --env-file=.env --import tsx scripts/export-bench-paths.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
