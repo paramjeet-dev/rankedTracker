@@ -7,6 +7,9 @@ export function seasonIdAt(unixSec: number): number {
 }
 export const currentSeasonId = (now = Date.now()) => seasonIdAt(Math.floor(now / 1000));
 export const previousSeasonId = (now = Date.now()) => currentSeasonId(now) - SEASON_LEN;
+/** The official API only serves the current season plus the previous N (observed: N=4; older group lookups answer HTTP 500). */
+export const SEASON_WINDOW_WEEKS = Number(process.env.SEASON_WINDOW_WEEKS ?? 4);
+export const oldestServedSeasonId = (now = Date.now()) => currentSeasonId(now) - SEASON_WINDOW_WEEKS * SEASON_LEN;
 export const seasonStart = (id: number) => new Date(id * 1000);
 export const seasonEnd = (id: number) => new Date((id + SEASON_LEN) * 1000);
 

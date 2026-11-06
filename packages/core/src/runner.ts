@@ -1,5 +1,6 @@
 import { sleep, log } from "./config.js";
-import { claim, complete, retryLater, type Job } from "./queue.js";
+import { claim, complete, retryLater, parkJobs, type Job } from "./queue.js";
+import { oldestServedSeasonId } from "@coc/shared";
 import { NotFound, RetryLater, setRps, limiterState, cocPrefetch, type PrefetchReq } from "./client.js";
 import { isOpen, startGateWatcher } from "./gate.js";
 import { ParseError } from "./parse.js";
@@ -30,8 +31,14 @@ export async function runWorker(o: WorkerOpts) {
     if (!isOpen()) { await sleep(1000); continue; }
     const free = o.concurrency - inflight;
     if (free <= 0) { await sleep(50); continue; }
-    const jobs = await claim(o.kinds, free);
-    if (jobs.length === 0) { await sleep(1000); continue; }
+    const claimed = await claim(o.kinds, free);
+    if (claimed.length === 0) { await sleep(1000); continue; }
+    // roster/memberlog jobs for seasons the API no longer serves would only earn HTTP 500s: park them, no API call
+    const floor = oldestServedSeasonId();
+    const expired = claimed.filter((j) => typeof j.payload?.seasonId === "number" && j.payload.seasonId < floor);
+    if (expired.length) await parkJobs(expired.map((j) => j.id), `season outside API window (< ${floor})`);
+    const jobs = expired.length ? claimed.filter((j) => !expired.includes(j)) : claimed;
+    if (jobs.length === 0) continue;
     inflight += jobs.length;
     void (async () => {
       if (o.prefetch) { try { await cocPrefetch(jobs.flatMap((j) => o.prefetch!(j))); } catch { /* handlers fall back to single requests */ } }

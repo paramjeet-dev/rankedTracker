@@ -9,6 +9,7 @@ import { cfg, sleep, envNum } from "./config.js";
 import { sql } from "./db.js";
 import { closeLocal, waitOpen } from "./gate.js";
 import { saveRaw } from "./raw.js";
+import { oldestServedSeasonId } from "@coc/shared";
 
 export class RetryLater extends Error { constructor(public delayMs: number, msg: string) { super(msg); } }
 export class NotFound extends Error {}
@@ -110,7 +111,11 @@ function interpret(r: Resp, path: string, meta: { kind: string; key: string; sea
   if (r.status === 429) throw new RetryLater((r.retryAfter ?? 2) * 1000, "429 throttled");
   if (json?.reason === "gateway") throw new RetryLater((r.retryAfter ?? 2) * 1000, `gateway: ${json.message}`);
   if (r.status === 403) throw new RetryLater(30_000, `403 (key/IP problem?) ${r.text.slice(0, 120)}`);
-  if (r.status >= 500) throw new RetryLater(10_000, `upstream ${r.status}`);
+  if (r.status >= 500) {
+    // the API answers 500 (not 404) for group lookups of seasons that fell out of its window: that is permanent, don't retry
+    if (meta.kind === "group" && meta.seasonId != null && meta.seasonId < oldestServedSeasonId()) throw new NotFound(`season ${meta.seasonId} outside API window`);
+    throw new RetryLater(10_000, `upstream ${r.status}`);
+  }
   throw new Error(`HTTP ${r.status}: ${r.text.slice(0, 200)}`);
 }
 const parse = (text: string) => { try { return JSON.parse(text); } catch { return null; } };

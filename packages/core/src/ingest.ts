@@ -1,4 +1,4 @@
-import { SEASON_LEN, currentSeasonId, inScope } from "@coc/shared";
+import { SEASON_LEN, currentSeasonId, inScope, oldestServedSeasonId } from "@coc/shared";
 import { sql } from "./db.js";
 import { enqueueMany, type NewJob } from "./queue.js";
 import { cfg, envNum } from "./config.js";
@@ -29,7 +29,7 @@ export async function discoverGroup(seasonId: number, groupTag: string, probeTag
   await sql`insert into league_group (season_id, group_tag, tier_id, probe_player_tag) values (${seasonId}, ${groupTag}, ${tierId}, ${probeTag})
             on conflict (season_id, group_tag) do update set tier_id = coalesce(league_group.tier_id, excluded.tier_id)`;
   const [g] = await sql`select roster_fetched_at from league_group where season_id = ${seasonId} and group_tag = ${groupTag}`;
-  if (!g.roster_fetched_at) await enqueueMany([{ kind: "roster", dedupeKey: `${seasonId}:${groupTag}`, payload: { seasonId, groupTag, probeTag }, priority }]);
+  if (!g.roster_fetched_at && seasonId >= oldestServedSeasonId()) await enqueueMany([{ kind: "roster", dedupeKey: `${seasonId}:${groupTag}`, payload: { seasonId, groupTag, probeTag }, priority }]);
 }
 
 export async function saveHistory(tag: string, rows: HistoryRow[]) {
@@ -88,7 +88,7 @@ export async function saveGroup(g: Group, seasonId: number, groupTag: string, pr
 
 /** After a season ended: queue member-log jobs by value (top 5 for the race chart, promotion/demotion bubble, then the rest by trophies). */
 export async function queueMemberLogs(seasonId: number, groupTag: string) {
-  if (!seasonEnded(seasonId)) return 0;
+  if (!seasonEnded(seasonId) || seasonId < oldestServedSeasonId()) return 0;
   const [g] = await sql<{ tier_id: number | null; members_total: number }[]>`select tier_id, members_total from league_group where season_id = ${seasonId} and group_tag = ${groupTag}`;
   const [t] = g?.tier_id ? await sql<{ promote_rate: number; demote_rate: number }[]>`select promote_rate, demote_rate from league_tier where tier_id = ${g.tier_id}` : [];
   const rows = await sql<{ player_tag: string; log_final: boolean }[]>`select player_tag, log_final from group_member where season_id = ${seasonId} and group_tag = ${groupTag} order by trophies desc, player_tag`;

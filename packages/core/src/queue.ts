@@ -30,6 +30,10 @@ export async function claim(kinds: string[], limit: number): Promise<Job[]> {
 
 export const complete = (id: number) => sql`delete from job where id = ${id}`;
 
+/** Park jobs without running them (reversible: update job set status='queued' where last_error like 'season outside API window%'). */
+export const parkJobs = (ids: number[], why: string) =>
+  ids.length ? sql`update job set status = 'failed', last_error = ${why}, updated_at = now() where id in ${sql(ids)}` : Promise.resolve();
+
 /** countAttempt=false for "try later" signals (429, maintenance) that must not exhaust attempts. */
 export async function retryLater(job: Job, delayMs: number, err: string, countAttempt: boolean, maxAttempts: number) {
   if (countAttempt && job.attempts >= maxAttempts) {
