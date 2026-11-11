@@ -21,6 +21,7 @@ export async function runWorker(o: WorkerOpts) {
     try { await o.handlers[job.kind](job); await complete(job.id); done++; }
     catch (e: any) {
       if (e instanceof RetryLater) await retryLater(job, e.delayMs, e.message, false, max);
+      else if (e?.code === "40P01" || e?.code === "40001") await retryLater(job, 500 + Math.random() * 2500, `db ${e.code} (deadlock/serialization), retrying`, false, max); // transient: don't burn attempts
       else if (e instanceof NotFound) { await complete(job.id); } // player/group gone: nothing to retry
       else if (e instanceof ParseError) { failed++; await retryLater(job, 0, `ParseError: ${e.message}`, true, 1); log(o.name, "PARSE ERROR", e.message); } // fail fast: raw is saved, fix parser, requeue
       else { failed++; await retryLater(job, Math.min(600_000, 5000 * 2 ** job.attempts), String(e?.message ?? e), true, max); }

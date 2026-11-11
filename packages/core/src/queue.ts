@@ -13,6 +13,7 @@ export async function enqueueMany(jobs: NewJob[]): Promise<void> {
       select t.kind, t.dedupe_key, t.payload, t.priority, now() + make_interval(secs => t.delay)
       from jsonb_to_recordset(${sql.json(rows.slice(i, i + 5000) as any)}::jsonb)
         as t(kind text, dedupe_key text, payload jsonb, priority smallint, delay int)
+      order by t.kind, t.dedupe_key
       on conflict (kind, dedupe_key) where status in ('queued','running') do nothing`;
   }
 }

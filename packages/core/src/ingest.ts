@@ -52,6 +52,7 @@ export async function saveGroup(g: Group, seasonId: number, groupTag: string, pr
   if (roster) {
   const fresh = await sql<{ tag: string; inserted: boolean }[]>`
     insert into player (tag, name) select t.tag, t.name from jsonb_to_recordset(${sql.json(g.members.map((m) => ({ tag: m.playerTag, name: m.playerName })) as any)}::jsonb) as t(tag text, name text)
+    order by t.tag
     on conflict (tag) do update set name = excluded.name returning tag, (xmax = 0) as inserted`;
   const added = fresh.filter((f) => f.inserted);
   const perGroup = envNum("PROFILES_PER_GROUP", 8); // history for everyone (layer A); profiles only for a sample: they just reveal 2 group refs each
@@ -63,6 +64,7 @@ export async function saveGroup(g: Group, seasonId: number, groupTag: string, pr
     select ${seasonId}, ${groupTag}, t.tag, t.name, t.clan_tag, t.clan_name, t.trophies, t.aw, t.al, t.dw, t.dl
     from jsonb_to_recordset(${sql.json(g.members.map((m) => ({ tag: m.playerTag, name: m.playerName, clan_tag: m.clanTag, clan_name: m.clanName, trophies: m.trophies, aw: m.atkWin, al: m.atkLoss, dw: m.defWin, dl: m.defLoss })) as any)}::jsonb)
       as t(tag text, name text, clan_tag text, clan_name text, trophies int, aw int, al int, dw int, dl int)
+    order by t.tag
     on conflict (season_id, group_tag, player_tag) do update set player_name = excluded.player_name, clan_tag = excluded.clan_tag, clan_name = excluded.clan_name,
       trophies = excluded.trophies, attack_wins = excluded.attack_wins, attack_losses = excluded.attack_losses, defense_wins = excluded.defense_wins,
       defense_losses = excluded.defense_losses, roster_fetched_at = now()`;
@@ -74,6 +76,7 @@ export async function saveGroup(g: Group, seasonId: number, groupTag: string, pr
     select ${seasonId}::bigint, ${groupTag}, t.a, t.d, t.ts, t.stars, t.dest, t.ag, t.dg, t.ar, t.dr
     from jsonb_to_recordset(${sql.json(g.battles.map((b) => ({ a: b.attacker, d: b.defender, ts: b.time, stars: b.stars, dest: b.destruction, ag: b.attackerGain, dg: b.defenderGain, ar: b.atkRep, dr: b.defRep })) as any)}::jsonb)
       as t(a text, d text, ts timestamptz, stars smallint, dest smallint, ag smallint, dg smallint, ar smallint, dr smallint)
+    order by t.a, t.d, t.ts
     on conflict (season_id, attacker_tag, defender_tag, battle_time) do update set
       atk_log_reported = coalesce(battle.atk_log_reported, excluded.atk_log_reported),
       def_log_reported = coalesce(battle.def_log_reported, excluded.def_log_reported)`;
