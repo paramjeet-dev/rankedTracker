@@ -11,3 +11,9 @@ export async function tierOfPlayerSeason(tag: string, seasonId: number): Promise
   await saveHistory(tag, parseHistory(await cocGet(historyPath(tag), { kind: "history", key: tag })));
   return q();
 }
+
+/** Tier of a group we already registered (no API call). Lets the profile worker skip the history call for the previous group when that group is known. */
+export async function knownGroupTier(seasonId: number, groupTag: string): Promise<number | null> {
+  const [r] = await sql<{ tier_id: number | null }[]>`select tier_id from league_group where season_id = ${seasonId} and group_tag = ${groupTag}`;
+  return r?.tier_id != null ? Number(r.tier_id) : null;
+}

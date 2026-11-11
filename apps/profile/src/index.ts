@@ -1,5 +1,5 @@
 /** Profile worker: player -> current/previous league group refs -> discover in-scope groups (queues roster jobs). */
-import { runWorker, cocGet, playerPath, parseProfile, saveProfile, discoverGroup, seasonEnded, tierOfPlayerSeason, envNum } from "@coc/core";
+import { runWorker, cocGet, playerPath, parseProfile, saveProfile, discoverGroup, seasonEnded, tierOfPlayerSeason, knownGroupTier, envNum } from "@coc/core";
 import { inScope } from "@coc/shared";
 process.env.PROC_NAME ??= "profile";
 
@@ -13,7 +13,7 @@ await runWorker({ name: "profile", kinds: ["profile"], concurrency: envNum("CONC
     if (p.current) await discoverGroup(p.current.seasonId, p.current.groupTag, p.tag, p.tierId, seasonEnded(p.current.seasonId) ? 1 : 6);
     if (p.previous) {
       // the previous group may belong to a different tier (promoted/demoted since): ask the player's history for that season's tier first
-      const tier = await tierOfPlayerSeason(p.tag, p.previous.seasonId);
+      const tier = (await knownGroupTier(p.previous.seasonId, p.previous.groupTag)) ?? (await tierOfPlayerSeason(p.tag, p.previous.seasonId)); // group already registered -> no history call
       await discoverGroup(p.previous.seasonId, p.previous.groupTag, p.tag, tier, seasonEnded(p.previous.seasonId) ? 1 : 6);
     }
   } } });

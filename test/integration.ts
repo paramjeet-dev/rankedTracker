@@ -88,6 +88,39 @@ await core.cleanupOutOfScope({ apply: true, purgeData: true });
 assert.equal((await sql`select count(*)::int n from league_group where tier_id = 105000025`)[0].n, 0);
 assert.equal((await sql`select count(*)::int n from job where dedupe_key in ('oos', '#ZZZ')`)[0].n, 0);
 assert.equal((await sql`select count(*)::int n from job where dedupe_key = '#AAA2'`)[0].n, 1, "in-scope work survives");
+// ---- weekly upkeep: new-group discovery (gap 1) ----
+const WEEK = 7 * 24 * 3600, CUR = SEASON + 2 * WEEK; // current season = Oct 26, past season with rosters = Oct 12
+await sql`update league_group set members_total = 3, roster_fetched_at = now() where season_id = ${SEASON} and group_tag = '#GRP1'`;
+await sql`select ensure_season(${CUR}::bigint)`;
+process.env.DISCOVERY_BATCH = "8";
+const nowC = (CUR + 3600) * 1000;
+const d1 = await core.discoverCurrentSeason(nowC);
+assert.equal(d1.action, "enqueued"); assert.ok(d1.enqueued! >= 3, "profiles queued for members of the past season");
+const dj = () => sql`select count(*)::int n from job where kind = 'profile' and priority = 0 and status = 'queued'`.then((r) => r[0].n);
+const nq = await dj(); assert.ok(nq > 0 && nq <= d1.enqueued!, "discovery jobs carry priority 0 (players whose profile job is already running are deduped)");
+assert.equal((await core.discoverCurrentSeason(nowC)).action, "waiting", "no new batch while the previous one is still queued");
+await sql`delete from job where priority = 0`;
+await sql`update player set last_profiled_at = to_timestamp(${CUR + 10}) where tag = '#AAA'`; // already profiled this season -> not sampled again
+const d2 = await core.discoverCurrentSeason(nowC);
+assert.equal(d2.enqueued, d1.enqueued! - 1, "players profiled since the season began are skipped");
+await sql`insert into league_group (season_id, group_tag, tier_id, probe_player_tag) values (${CUR}, '#NEW', 105000030, '#AAA')`;
+assert.equal((await core.discoverCurrentSeason(nowC)).action, "done", "stops once the current season is covered");
+await sql`delete from job where priority = 0`; delete process.env.DISCOVERY_BATCH;
+
+// ---- player_season refresh after a season ends (gap 2) ----
+const ENDED = SEASON + WEEK; await sql`select ensure_season(${ENDED}::bigint)`;
+await sql`insert into group_member (season_id, group_tag, player_tag, trophies) values (${ENDED}, '#G2', '#H1', 1), (${ENDED}, '#G2', '#H2', 2)`;
+await sql`insert into player_season (player_tag, season_id, tier_id, trophies, placement) values ('#H2', ${ENDED}, 105000030, 2, 1)`;
+const hq = () => sql`select dedupe_key from job where kind = 'history' and dedupe_key in ('#H1', '#H2') and status = 'queued' order by 1`.then((r) => r.map((x) => x.dedupe_key));
+assert.equal(await core.refreshPlayerSeasons((CUR + 600) * 1000), null, "nothing before the +1h pass");
+const h1 = await core.refreshPlayerSeasons((CUR + 2 * 3600) * 1000);
+assert.deepEqual([h1!.pass, h1!.enqueued], [0, 1]); assert.deepEqual(await hq(), ["#H1"], "only the player without a player_season row");
+assert.equal(await core.refreshPlayerSeasons((CUR + 3 * 3600) * 1000), null, "pass already done");
+const h2 = await core.refreshPlayerSeasons((CUR + 30 * 3600) * 1000);
+assert.equal(h2!.pass, 1); assert.deepEqual(await hq(), ["#H1"], "re-queue is deduped");
+assert.equal((await core.refreshPlayerSeasons((CUR + 80 * 3600) * 1000))!.pass, 2, "late start runs only the latest due pass");
+assert.equal(await core.knownGroupTier(SEASON, "#GRP1"), 105000033); assert.equal(await core.knownGroupTier(SEASON, "#NOPE"), null);
+await sql`delete from job where dedupe_key in ('#H1', '#H2')`;
 const cov = await sql`select * from coverage_by_season`; console.table(cov);
 const res = await sql`select * from player_season_result limit 1`; // view compiles
 console.log("OK: schema, ingest, dedupe, queue, coverage view all work");

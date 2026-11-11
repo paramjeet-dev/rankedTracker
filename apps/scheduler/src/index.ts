@@ -1,5 +1,5 @@
 /** Scheduler: stale-job recovery, daily seeds, season-end sweeps (3 passes), raw pruning, coverage report. Makes no API calls. */
-import { sql, sleep, log, enqueue, enqueueMany, requeueStale, pruneRaw, currentSeasonId } from "@coc/core";
+import { sql, sleep, log, enqueue, enqueueMany, requeueStale, pruneRaw, currentSeasonId, discoverCurrentSeason, refreshPlayerSeasons } from "@coc/core";
 import { SEASON_LEN } from "@coc/shared";
 process.env.PROC_NAME ??= "scheduler";
 
@@ -23,7 +23,7 @@ async function sweep() {
   await setState("sweep", st);
 }
 
-let lastDaily = "", lastCoverage = 0;
+let lastDaily = "", lastCoverage = 0, lastUpkeep = 0;
 for (;;) {
   try {
     await requeueStale(10);
@@ -38,6 +38,11 @@ for (;;) {
         from group_member gm join player_season ps on ps.player_tag = gm.player_tag and ps.season_id = gm.season_id
         group by 1, 2) x where g.season_id = x.season_id and g.group_tag = x.group_tag and g.tier_id is null`;
       log("scheduler", `pruned ${pruneRaw()} raw day-directories`);
+    }
+    if (Date.now() - lastUpkeep > 300_000) { // weekly upkeep checks every 5 min: new-group discovery batches + post-season history refresh
+      lastUpkeep = Date.now();
+      const d = await discoverCurrentSeason(); if (d.action !== "waiting" && d.action !== "done") log("scheduler", "discovery", JSON.stringify(d));
+      const h = await refreshPlayerSeasons(); if (h) log("scheduler", "history refresh", JSON.stringify(h));
     }
     if (Date.now() - lastCoverage > 600_000) {
       lastCoverage = Date.now();
