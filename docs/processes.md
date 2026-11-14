@@ -33,5 +33,9 @@ the roster worker then queues all missing member logs (top 5 = priority 1, promo
 - **New-group discovery.** Groups reshuffle each season, so the only way to a new group is a member's profile. While the current season has fewer known groups than
   `DISCOVERY_TARGET_PCT` (99) of the largest season seen, it queues a batch (`DISCOVERY_BATCH`, 25000; max `DISCOVERY_MAX_BATCHES`, 10 per season) of profile jobs at priority 0
   for random members of the most complete past season not yet profiled this season. The next batch waits until the previous one has mostly drained.
-- **Post-season history refresh.** At +1h/+24h/+72h after a season ends, queues `history` (priority 3) for every member of that season with no `player_season` row for it.
+- **Previous season too.** A profile only exposes the current and previous group, so a season's group tags are findable only until the second Monday after it starts; coverage is checked for both seasons.
+- **Post-season player_season.** At +1h/+24h/+72h/+6d after a season ends, `player_season` rows are *derived* from the rosters (tier = group tier, placement = rank by trophies, ties by average attack stars; `source='derived'`, no API call) and `history` is queued for a `HISTORY_SAMPLE_PCT` (3) sample. `history` rows replace derived ones; disagreements accumulate in `system_state` key `derived_check` (`select value from system_state where key='derived_check'`).
 - State lives in `system_state` keys `discovery` and `history_refresh`. Raise `RPS_PROFILE` and `RPS_HISTORY` for the Monday catch-up (about 100k profiles + up to ~2M histories on a first run).
+
+## Claim order (queue.ts)
+`claim` orders by `job.season_id` (from `payload.seasonId`, nulls last), then priority: the season closest to leaving the API window goes first, ahead of any newer season's higher-priority job. Jobs without a season (profile, history, seeds) still follow priority only. Needs migration 005 (`npm run migrate`, then `npm run backfill:job-season`).

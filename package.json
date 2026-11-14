@@ -24,6 +24,8 @@
     "start:roster": "node --env-file=.env --import tsx apps/roster/src/index.ts",
     "start:memberlog": "node --env-file=.env --import tsx apps/memberlog/src/index.ts",
     "start:aggregator": "node --env-file=.env --import tsx apps/aggregator/src/index.ts",
+    "migrate": "node --env-file=.env --import tsx scripts/migrate.ts",
+    "backfill:job-season": "node --env-file=.env --import tsx scripts/backfill-job-season.ts",
     "cleanup": "node --env-file=.env --import tsx scripts/cleanup.ts",
     "bench": "node --env-file=.env --import tsx scripts/bench.ts",
     "bench:export": "node --env-file=.env --import tsx scripts/export-bench-paths.ts"

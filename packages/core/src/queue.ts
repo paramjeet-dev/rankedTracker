@@ -3,14 +3,14 @@ import { sql } from "./db.js";
 export interface Job { id: number; kind: string; dedupeKey: string; payload: any; attempts: number }
 export interface NewJob { kind: string; dedupeKey: string; payload: unknown; priority?: number; delaySec?: number }
 
-/** Lower priority number = sooner. Duplicate queued/running jobs (same kind + dedupeKey) are ignored. */
+/** Lower priority number = sooner (within a season). Jobs carrying payload.seasonId also record job.season_id so claim() takes the oldest season first. Duplicate queued/running jobs (same kind + dedupeKey) are ignored. */
 export async function enqueueMany(jobs: NewJob[]): Promise<void> {
   if (jobs.length === 0) return;
   const rows = jobs.map((j) => ({ kind: j.kind, dedupe_key: j.dedupeKey, payload: j.payload, priority: j.priority ?? 5, delay: j.delaySec ?? 0 }));
   for (let i = 0; i < rows.length; i += 5000) {
     await sql`
-      insert into job (kind, dedupe_key, payload, priority, run_after)
-      select t.kind, t.dedupe_key, t.payload, t.priority, now() + make_interval(secs => t.delay)
+      insert into job (kind, dedupe_key, payload, priority, run_after, season_id)
+      select t.kind, t.dedupe_key, t.payload, t.priority, now() + make_interval(secs => t.delay), (t.payload->>'seasonId')::bigint
       from jsonb_to_recordset(${sql.json(rows.slice(i, i + 5000) as any)}::jsonb)
         as t(kind text, dedupe_key text, payload jsonb, priority smallint, delay int)
       order by t.kind, t.dedupe_key
@@ -19,13 +19,14 @@ export async function enqueueMany(jobs: NewJob[]): Promise<void> {
 }
 export const enqueue = (j: NewJob) => enqueueMany([j]);
 
+/** Oldest season first (nulls last): the season closest to leaving the API window can never be fetched again, so it goes before any newer season's higher-priority work. */
 export async function claim(kinds: string[], limit: number): Promise<Job[]> {
   return sql<Job[]>`
     update job set status = 'running', locked_at = now(), attempts = attempts + 1, updated_at = now()
     where id in (
       select id from job
       where status = 'queued' and kind in ${sql(kinds)} and run_after <= now()
-      order by priority, run_after, id limit ${limit} for update skip locked)
+      order by season_id, priority, run_after, id limit ${limit} for update skip locked)
     returning id, kind, dedupe_key as "dedupeKey", payload, attempts`;
 }
 

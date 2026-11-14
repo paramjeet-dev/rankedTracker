@@ -16,10 +16,12 @@ const getState = async (k: string) => (await sql`select value from system_state 
 const setState = (k: string, v: unknown) => sql`insert into system_state (key, value, updated_at) values (${k}, ${sql.json(v as any)}, now())
   on conflict (key) do update set value = excluded.value, updated_at = now()`;
 
-export interface DiscoveryResult { action: "no_reference" | "done" | "max_batches" | "waiting" | "enqueued"; known?: number; target?: number; enqueued?: number; batches?: number }
+export interface DiscoveryResult { action: "no_reference" | "done" | "max_batches" | "waiting" | "enqueued"; known?: number; knownPrev?: number; target?: number; enqueued?: number; batches?: number }
 
 /**
- * Gap 1. Group membership is reshuffled each week, so old group tags say nothing about the new ones; the only way in is a player's profile.
+ * Gap 1. A profile exposes only the player's CURRENT and PREVIOUS group, so a season's group tags can be found only until the second Monday after it
+ * started (e.g. the Nov 2 season's tags are lost on Nov 16 05:00 UTC). Coverage is therefore tracked for both the current and the previous season.
+ * Group membership is reshuffled each week, so old group tags say nothing about the new ones; the only way in is a player's profile.
  * Each tick (cheap) it compares the groups known for the current season with the biggest season seen so far and, while coverage is short,
  * enqueues one more batch of profile jobs for random members of the most complete past season who weren't profiled since this season began.
  * A batch is only added once the previous one has mostly drained. Sampling is random, so coverage grows like 1 - e^(-profiles/groups).
@@ -43,8 +45,10 @@ export async function discoverCurrentSeason(now = Date.now()): Promise<Discovery
   if (source.members === 0) return { action: "no_reference" };
 
   const [{ known }] = await sql<{ known: number }[]>`select count(*)::int as known from league_group where season_id = ${cur}`;
-  const base = { known, target, batches: st.batches };
-  if (known >= (target * targetPct) / 100) { await setState("discovery", st); return { action: "done", ...base }; }
+  const [{ knownPrev }] = await sql<{ knownPrev: number }[]>`select count(*)::int as "knownPrev" from league_group where season_id = ${cur - SEASON_LEN}`;
+  const base = { known, knownPrev, target, batches: st.batches };
+  const covered = (n: number) => n >= (target * targetPct) / 100;
+  if (covered(known) && covered(knownPrev)) { await setState("discovery", st); return { action: "done", ...base }; }
   if (st.batches >= maxBatches) { await setState("discovery", st); return { action: "max_batches", ...base }; }
 
   const [{ backlog }] = await sql<{ backlog: number }[]>`select count(*)::int as backlog from job where status = 'queued' and priority = ${DISCOVERY_PRIORITY} and kind = 'profile'`;
@@ -64,13 +68,31 @@ export async function discoverCurrentSeason(now = Date.now()): Promise<Discovery
 }
 
 /**
- * Gap 2. `history` is only queued for brand-new players, so a returning player's newest season (placement, tier, defense stars) was never fetched.
- * Once a season has ended (history excludes the ongoing one) this queues `history` for every player who was in a group that season but has no
- * player_season row for it. Passes at +1h, +24h and +72h cover late publication; the anti-join makes each pass cost only what is still missing.
- * One history call returns every season, so it also heals older gaps for that player.
+ * Gap 2. A returning player's newest season (tier, placement, final trophies, W/L) used to be fetched only through `history`, i.e. one API call per
+ * player per week (~2M calls). The group rosters already hold final trophies and W/L counters, and the tier is the group's tier, so the row is
+ * derived from them with no API call (source='derived'; placement = rank by trophies, ties by average attack stars). `history` is queued only for a
+ * sample (HISTORY_SAMPLE_PCT, default 3) and its rows replace derived ones; saveHistory counts any disagreement in system_state 'derived_check'.
+ * defense_stars and max_battles stay null on derived rows.
  */
-export const HISTORY_PASSES_SEC = [3600, 24 * 3600, 72 * 3600];
-export async function refreshPlayerSeasons(now = Date.now()): Promise<{ seasonId: number; pass: number; enqueued: number } | null> {
+export async function derivePlayerSeasons(seasonId: number): Promise<number> {
+  const r = await sql`
+    insert into player_season (player_tag, season_id, tier_id, trophies, placement, attack_wins, attack_losses, defense_wins, defense_losses, source)
+    select gm.player_tag, gm.season_id, lg.tier_id, gm.trophies,
+           row_number() over (partition by gm.group_tag order by gm.trophies desc, coalesce(st.avg_stars, 0) desc, gm.player_tag)::int,
+           gm.attack_wins, gm.attack_losses, gm.defense_wins, gm.defense_losses, 'derived'
+    from group_member gm
+    join league_group lg on lg.season_id = gm.season_id and lg.group_tag = gm.group_tag
+    left join (select attacker_tag, avg(stars) as avg_stars from battle where season_id = ${seasonId} group by 1) st on st.attacker_tag = gm.player_tag
+    where gm.season_id = ${seasonId} and lg.tier_id is not null and lg.roster_fetched_at >= to_timestamp(${seasonId + SEASON_LEN}) -- roster taken after the season ended
+    on conflict (season_id, player_tag) do update set tier_id = excluded.tier_id, trophies = excluded.trophies, placement = excluded.placement,
+      attack_wins = excluded.attack_wins, attack_losses = excluded.attack_losses, defense_wins = excluded.defense_wins, defense_losses = excluded.defense_losses
+      where player_season.source = 'derived'`; // never overwrite an api row; later passes refine derived rows as more logs (tie-break stars) arrive
+  return r.count;
+}
+
+/** Passes at +1h, +24h, +72h and +6d after a season ends (rosters and logs arrive over days). */
+export const HISTORY_PASSES_SEC = [3600, 24 * 3600, 72 * 3600, 6 * 24 * 3600];
+export async function refreshPlayerSeasons(now = Date.now()): Promise<{ seasonId: number; pass: number; derived: number; enqueued: number } | null> {
   const ended = currentSeasonId(now) - SEASON_LEN;
   const elapsed = now / 1000 - (ended + SEASON_LEN);
   const st = (await getState("history_refresh")) ?? { seasonId: 0, pass: 0 };
@@ -78,12 +100,15 @@ export async function refreshPlayerSeasons(now = Date.now()): Promise<{ seasonId
   let due = -1; HISTORY_PASSES_SEC.forEach((s, i) => { if (i >= st.pass && elapsed >= s) due = i; }); // catch up: only the latest due pass runs
   if (due < 0) { await setState("history_refresh", st); return null; }
 
+  const derived = await derivePlayerSeasons(ended);
+  const pct = envNum("HISTORY_SAMPLE_PCT", 3);
   let enqueued = 0, lastG = "", lastP = "";
   for (;;) { // keyset pages in primary-key order (season_id, group_tag, player_tag): index scan, no sort, no long-held connection
     const rows = await sql<{ group_tag: string; player_tag: string }[]>`
       select gm.group_tag, gm.player_tag from group_member gm
       where gm.season_id = ${ended} and (gm.group_tag, gm.player_tag) > (${lastG}, ${lastP})
-        and not exists (select 1 from player_season ps where ps.season_id = gm.season_id and ps.player_tag = gm.player_tag)
+        and abs(hashtext(gm.player_tag || ${String(ended)})) % 100 < ${pct}
+        and not exists (select 1 from player_season ps where ps.season_id = gm.season_id and ps.player_tag = gm.player_tag and ps.source = 'api')
       order by gm.group_tag, gm.player_tag limit 20000`;
     if (rows.length === 0) break;
     await enqueueMany(rows.map((r) => ({ kind: "history", dedupeKey: r.player_tag, payload: { tag: r.player_tag }, priority: 3 })));
@@ -91,5 +116,5 @@ export async function refreshPlayerSeasons(now = Date.now()): Promise<{ seasonId
   }
   st.pass = due + 1;
   await setState("history_refresh", st);
-  return { seasonId: ended, pass: due, enqueued };
+  return { seasonId: ended, pass: due, derived, enqueued };
 }

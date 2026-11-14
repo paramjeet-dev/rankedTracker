@@ -34,14 +34,24 @@ export async function discoverGroup(seasonId: number, groupTag: string, probeTag
 
 export async function saveHistory(tag: string, rows: HistoryRow[]) {
   for (const r of rows) await ensureSeason(r.seasonId);
+  if (rows.length && process.env.DERIVED_CHECK !== "0") { // validate derived rows (built from rosters) against the real thing
+    const [c] = await sql<{ n: number; placement: number; tier: number; trophies: number }[]>`
+      select count(*)::int n, count(*) filter (where ps.placement is distinct from t.placement)::int placement, count(*) filter (where ps.tier_id is distinct from t.tier_id)::int tier,
+             count(*) filter (where ps.trophies is distinct from t.trophies)::int trophies
+      from player_season ps join jsonb_to_recordset(${sql.json(rows.map((r) => ({ season_id: r.seasonId, tier_id: r.tierId, trophies: r.trophies, placement: r.placement })) as any)}::jsonb) as t(season_id bigint, tier_id int, trophies int, placement int)
+        on ps.season_id = t.season_id where ps.player_tag = ${tag} and ps.source = 'derived'`;
+    if (c.n > 0) await sql`insert into system_state (key, value, updated_at) values ('derived_check', ${sql.json(c as any)}, now())
+      on conflict (key) do update set updated_at = now(), value = jsonb_build_object('n', (system_state.value->>'n')::int + ${c.n}, 'placement', (system_state.value->>'placement')::int + ${c.placement},
+        'tier', (system_state.value->>'tier')::int + ${c.tier}, 'trophies', (system_state.value->>'trophies')::int + ${c.trophies})`;
+  }
   if (rows.length) await sql`
-    insert into player_season (player_tag, season_id, tier_id, trophies, placement, attack_wins, attack_losses, defense_wins, defense_losses, defense_stars, max_battles)
-    select ${tag}, t.season_id, t.tier_id, t.trophies, t.placement, t.aw, t.al, t.dw, t.dl, t.ds, t.mb
+    insert into player_season (player_tag, season_id, tier_id, trophies, placement, attack_wins, attack_losses, defense_wins, defense_losses, defense_stars, max_battles, source)
+    select ${tag}, t.season_id, t.tier_id, t.trophies, t.placement, t.aw, t.al, t.dw, t.dl, t.ds, t.mb, 'api'
     from jsonb_to_recordset(${sql.json(rows.map((r) => ({ season_id: r.seasonId, tier_id: r.tierId, trophies: r.trophies, placement: r.placement, aw: r.attackWins, al: r.attackLosses, dw: r.defenseWins, dl: r.defenseLosses, ds: r.defenseStars, mb: r.maxBattles })) as any)}::jsonb)
       as t(season_id bigint, tier_id int, trophies int, placement int, aw int, al int, dw int, dl int, ds int, mb int)
     on conflict (season_id, player_tag) do update set tier_id = excluded.tier_id, trophies = excluded.trophies, placement = excluded.placement,
       attack_wins = excluded.attack_wins, attack_losses = excluded.attack_losses, defense_wins = excluded.defense_wins, defense_losses = excluded.defense_losses,
-      defense_stars = excluded.defense_stars, max_battles = excluded.max_battles`;
+      defense_stars = excluded.defense_stars, max_battles = excluded.max_battles, source = 'api'`;
   await sql`update player set last_history_at = now() where tag = ${tag}`;
 }
 

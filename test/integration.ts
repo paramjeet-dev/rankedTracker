@@ -4,7 +4,7 @@ import fs from "node:fs";
 import assert from "node:assert/strict";
 
 const db = new PGlite();
-for (const f of ["001_init.sql", "002_workers.sql", "003_analytics.sql", "004_diagnostics.sql"]) await db.exec(fs.readFileSync(`packages/db/migrations/${f}`, "utf8"));
+for (const f of ["001_init.sql", "002_workers.sql", "003_analytics.sql", "004_diagnostics.sql", "005_expiry_order.sql"]) await db.exec(fs.readFileSync(`packages/db/migrations/${f}`, "utf8"));
 const server = new PGLiteSocketServer({ db, port: 54329, host: "127.0.0.1" });
 await server.start();
 process.env.DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:54329/postgres";
@@ -103,11 +103,17 @@ await sql`delete from job where priority = 0`;
 await sql`update player set last_profiled_at = to_timestamp(${CUR + 10}) where tag = '#AAA'`; // already profiled this season -> not sampled again
 const d2 = await core.discoverCurrentSeason(nowC);
 assert.equal(d2.enqueued, d1.enqueued! - 1, "players profiled since the season began are skipped");
+await sql`delete from job where priority = 0`;
 await sql`insert into league_group (season_id, group_tag, tier_id, probe_player_tag) values (${CUR}, '#NEW', 105000030, '#AAA')`;
-assert.equal((await core.discoverCurrentSeason(nowC)).action, "done", "stops once the current season is covered");
+assert.equal((await core.discoverCurrentSeason(nowC)).action, "enqueued", "current season covered but the previous one (its tags vanish first) is not");
+await sql`delete from job where priority = 0`;
+await sql`select ensure_season(${CUR - WEEK}::bigint)`;
+await sql`insert into league_group (season_id, group_tag, tier_id, probe_player_tag) values (${CUR - WEEK}, '#PREV', 105000030, '#AAA')`;
+assert.equal((await core.discoverCurrentSeason(nowC)).action, "done", "stops once current and previous seasons are covered");
 await sql`delete from job where priority = 0`; delete process.env.DISCOVERY_BATCH;
 
 // ---- player_season refresh after a season ends (gap 2) ----
+process.env.HISTORY_SAMPLE_PCT = "100";
 const ENDED = SEASON + WEEK; await sql`select ensure_season(${ENDED}::bigint)`;
 await sql`insert into group_member (season_id, group_tag, player_tag, trophies) values (${ENDED}, '#G2', '#H1', 1), (${ENDED}, '#G2', '#H2', 2)`;
 await sql`insert into player_season (player_tag, season_id, tier_id, trophies, placement) values ('#H2', ${ENDED}, 105000030, 2, 1)`;
@@ -121,6 +127,33 @@ assert.equal(h2!.pass, 1); assert.deepEqual(await hq(), ["#H1"], "re-queue is de
 assert.equal((await core.refreshPlayerSeasons((CUR + 80 * 3600) * 1000))!.pass, 2, "late start runs only the latest due pass");
 assert.equal(await core.knownGroupTier(SEASON, "#GRP1"), 105000033); assert.equal(await core.knownGroupTier(SEASON, "#NOPE"), null);
 await sql`delete from job where dedupe_key in ('#H1', '#H2')`;
+delete process.env.HISTORY_SAMPLE_PCT;
+
+// derived player_season rows (no API call): placement by trophies, group tier, api rows replace them and are compared
+await sql`update league_group set roster_fetched_at = now() where season_id = ${SEASON} and group_tag = '#GRP1'`;
+assert.equal(await core.derivePlayerSeasons(SEASON), 3);
+const dps = await sql`select player_tag, placement, tier_id, source from player_season where season_id = ${SEASON} order by placement`;
+assert.deepEqual(dps.map((r) => [r.player_tag, r.placement, Number(r.tier_id), r.source]), [["#AAA", 1, 105000033, "derived"], ["#BBB", 2, 105000033, "derived"], ["#CCC", 3, 105000033, "derived"]]);
+await sql`update league_group set roster_fetched_at = to_timestamp(${SEASON}) where season_id = ${SEASON} and group_tag = '#GRP1'`;
+await sql`delete from player_season where season_id = ${SEASON}`; assert.equal(await core.derivePlayerSeasons(SEASON), 0, "a roster taken before the season ended is not final");
+await sql`update league_group set roster_fetched_at = now() where season_id = ${SEASON} and group_tag = '#GRP1'`; await core.derivePlayerSeasons(SEASON);
+await core.saveHistory("#AAA", [{ seasonId: SEASON, tierId: 105000033, trophies: 500, placement: 2, attackWins: 2, attackLosses: 0, defenseWins: 1, defenseLosses: 1, defenseStars: 3, maxBattles: 8 }]);
+const [aaa] = await sql`select placement, source, max_battles from player_season where season_id = ${SEASON} and player_tag = '#AAA'`;
+assert.deepEqual([aaa.placement, aaa.source, aaa.max_battles], [2, "api", 8], "history replaces the derived row");
+const [dc] = await sql`select value from system_state where key = 'derived_check'`; assert.deepEqual(dc.value, { n: 1, placement: 1, tier: 0, trophies: 0 }, "disagreement with the derived placement is counted");
+await core.derivePlayerSeasons(SEASON); assert.equal((await sql`select source from player_season where season_id = ${SEASON} and player_tag = '#AAA'`)[0].source, "api", "a later derive never overwrites an api row");
+
+// claim order: the oldest season first, even against a newer season's higher priority; unseasoned kinds still follow priority
+await sql`delete from job where kind in ('memberlog', 'profile', 'history')`;
+await core.enqueueMany([
+  { kind: "memberlog", dedupeKey: "new", payload: { seasonId: SEASON + 2 * WEEK }, priority: 1 },
+  { kind: "memberlog", dedupeKey: "old-low", payload: { seasonId: SEASON }, priority: 3 },
+  { kind: "memberlog", dedupeKey: "old-high", payload: { seasonId: SEASON }, priority: 1 }]);
+const order: string[] = []; for (let i = 0; i < 3; i++) order.push(...(await core.claim(["memberlog"], 1)).map((j) => j.dedupeKey)); // claim 1 at a time (RETURNING order of a batch is unspecified)
+assert.deepEqual(order, ["old-high", "old-low", "new"]);
+await core.enqueueMany([{ kind: "profile", dedupeKey: "p8", payload: { tag: "#P8" }, priority: 8 }, { kind: "profile", dedupeKey: "p0", payload: { tag: "#P0" }, priority: 0 }]);
+assert.equal((await core.claim(["profile"], 1))[0].dedupeKey, "p0"); await core.claim(["profile"], 1);
+await sql`delete from job where kind in ('memberlog', 'profile')`;
 const cov = await sql`select * from coverage_by_season`; console.table(cov);
 const res = await sql`select * from player_season_result limit 1`; // view compiles
 console.log("OK: schema, ingest, dedupe, queue, coverage view all work");
