@@ -26,6 +26,8 @@
     "start:aggregator": "node --env-file=.env --import tsx apps/aggregator/src/index.ts",
     "migrate": "node --env-file=.env --import tsx scripts/migrate.ts",
     "backfill:job-season": "node --env-file=.env --import tsx scripts/backfill-job-season.ts",
+    "seasons": "node --env-file=.env --import tsx scripts/seasons.ts",
+    "trim-queue": "node --env-file=.env --import tsx scripts/trim-queue.ts",
     "cleanup": "node --env-file=.env --import tsx scripts/cleanup.ts",
     "bench": "node --env-file=.env --import tsx scripts/bench.ts",
     "bench:export": "node --env-file=.env --import tsx scripts/export-bench-paths.ts"
